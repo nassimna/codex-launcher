@@ -618,6 +618,24 @@ __LAUNCHER__
 }
 
 ensure_desktop_entry() {
+  # Remove stale duplicate Codex launcher entries from previous runs/names.
+  cleanup_legacy_desktop_entries() {
+    local app_dir="${HOME}/.local/share/applications"
+    local file
+
+    shopt -s nullglob
+    for file in "$app_dir"/*.desktop; do
+      if grep -q '^Name=OpenAI Codex$' "$file" \
+        && grep -q '^Exec=.*run-codex\.sh' "$file" \
+        && [ "$file" != "$DESKTOP_ENTRY_PATH" ]; then
+        rm -f "$file"
+      fi
+    done
+    shopt -u nullglob
+  }
+
+  cleanup_legacy_desktop_entries
+
   mkdir -p "$(dirname "$DESKTOP_ENTRY_PATH")"
   cat > "$DESKTOP_ENTRY_PATH" <<EOF
 [Desktop Entry]
