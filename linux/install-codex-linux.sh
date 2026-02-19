@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Backward-compatible wrapper. Real Linux installer lives in linux/.
+# Prefer local bridge when this installer is running from a repo/archive checkout.
 SOURCE="${BASH_SOURCE[0]}"
 while [ -L "$SOURCE" ]; do
   DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
   SOURCE="$(readlink "$SOURCE")"
   [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
 done
-SELF_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
-LOCAL_INSTALLER="$SELF_DIR/linux/install-codex-linux.sh"
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+LOCAL_BRIDGE="$SCRIPT_DIR/codex-linux-bridge.sh"
 
-if [ -f "$LOCAL_INSTALLER" ]; then
-  exec "$LOCAL_INSTALLER" "$@"
+if [ -f "$LOCAL_BRIDGE" ]; then
+  chmod +x "$LOCAL_BRIDGE"
+  exec "$LOCAL_BRIDGE" "$@"
 fi
 
 REPO_URL="https://github.com/nassimna/codex-linux-launcher"
@@ -37,14 +38,16 @@ fi
 
 echo "Downloading codex-linux-launcher archive..."
 curl -fsSL "$ARCHIVE_URL" -o "$TMP_DIR/source.tar.gz"
+
 tar -xzf "$TMP_DIR/source.tar.gz" -C "$TMP_DIR"
 
-INSTALLER_PATH="$TARGET_DIR/linux/install-codex-linux.sh"
-if [ ! -f "$INSTALLER_PATH" ]; then
-  echo "ERROR: extracted package does not contain expected installer." >&2
+if [ ! -f "$TARGET_DIR/linux/codex-linux-bridge.sh" ]; then
+  echo "ERROR: extracted package does not contain expected files." >&2
   exit 1
 fi
 
-chmod +x "$INSTALLER_PATH"
+chmod +x "$TARGET_DIR/linux/codex-linux-bridge.sh"
+
+# Use user's current directory as workspace by default (same as script behavior)
 cd "$TARGET_DIR"
-exec "$INSTALLER_PATH" "$@"
+./linux/codex-linux-bridge.sh "$@"
