@@ -58,6 +58,31 @@ Run the app:
 ~/.local/share/codex-macos-to-linux/run-codex.sh
 ```
 
+Create a desktop menu entry (so it appears in rofi/drun, app menus):
+
+```bash
+./codex-macos-to-linux.sh --install-desktop
+```
+
+Open rofi with:
+
+```bash
+rofi -show drun
+```
+
+If it still does not appear immediately:
+
+```bash
+update-desktop-database ~/.local/share/applications
+xdg-desktop-menu forceupdate
+```
+
+If you already had a stale entry, regenerate after updates:
+
+```bash
+./codex-macos-to-linux.sh --force
+```
+
 If sandbox blocks startup on your distro, try:
 
 ```bash
@@ -76,6 +101,8 @@ CODEX_NO_SANDBOX=1 ~/.local/share/codex-macos-to-linux/run-codex.sh
 - `--download-dir PATH` : override where `Codex.dmg` is downloaded
 - `--dmg-path PATH` : set explicit DMG location
 - `--force-electron-version X.Y.Z` : manually set Electron version
+- `--install-desktop` : write/overwrite desktop menu entry (default: on)
+- `--no-desktop` : skip menu entry creation
 - `--help` : show option list
 
 ## Environment variables

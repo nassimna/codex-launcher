@@ -3,6 +3,7 @@ set -euo pipefail
 
 APP_NAME="codex-macos-to-linux"
 APP_VERSION="1.2.0"
+APP_DISPLAY_NAME="OpenAI Codex"
 DMG_URL="${DMG_URL:-https://persistent.oaistatic.com/codex-app-prod/Codex.dmg}"
 DOWNLOAD_DIR="${DOWNLOAD_DIR:-${XDG_DOWNLOAD_DIR:-$HOME/Downloads}/$APP_NAME}"
 DMG_PATH="${DMG_PATH:-$DOWNLOAD_DIR/Codex.dmg}"
@@ -13,12 +14,14 @@ DMG_EXTRACT_DIR="$ROOT_DIR/dmg_extracted"
 APP_ASAR_DIR="$ROOT_DIR/app_asar"
 DMG_SIGNATURE_FILE="$ROOT_DIR/.dmg.signature"
 RUN_LAUNCHER="$ROOT_DIR/run-codex.sh"
+DESKTOP_ENTRY_PATH="${DESKTOP_ENTRY_PATH:-$HOME/.local/share/applications/$APP_NAME.desktop}"
 DMG_EXTRACT_BIN=""
 DMG_PATH_WAS_SET=0
 
 FORCE="${FORCE:-0}"
 SKIP_SYSTEM_DEPS="${SKIP_SYSTEM_DEPS:-0}"
 ELECTRON_VERSION_OVERRIDE="${FORCE_ELECTRON_VERSION:-}"
+INSTALL_DESKTOP_ENTRY="${INSTALL_DESKTOP_ENTRY:-1}"
 
 refresh_paths() {
   TOOLS_DIR="$ROOT_DIR/_tools"
@@ -42,9 +45,11 @@ Options:
   --download-dir PATH      Override DMG download folder (default: ~/Downloads/codex-macos-to-linux)
   --dmg-path PATH          Override Codex.dmg file path
   --force-electron-version  Override detected Electron version
+  --install-desktop        Write/overwrite desktop launcher (default: on)
+  --no-desktop             Skip desktop launcher creation
 
 Environment:
-  FORCE, SKIP_SYSTEM_DEPS, ROOT_APP_DIR, DOWNLOAD_DIR, DMG_PATH, FORCE_ELECTRON_VERSION
+  FORCE, SKIP_SYSTEM_DEPS, ROOT_APP_DIR, DOWNLOAD_DIR, DMG_PATH, FORCE_ELECTRON_VERSION, INSTALL_DESKTOP_ENTRY
 
 Examples:
   ./codex-macos-to-linux.sh --force
@@ -79,6 +84,12 @@ parse_args() {
         shift
         DMG_PATH="${1:?missing value for --dmg-path}"
         DMG_PATH_WAS_SET=1
+        ;;
+      --install-desktop)
+        INSTALL_DESKTOP_ENTRY=1
+        ;;
+      --no-desktop)
+        INSTALL_DESKTOP_ENTRY=0
         ;;
       --force-electron-version)
         shift
@@ -491,6 +502,32 @@ __LAUNCHER__
   chmod +x "$RUN_LAUNCHER"
 }
 
+ensure_desktop_entry() {
+  mkdir -p "$(dirname "$DESKTOP_ENTRY_PATH")"
+  cat > "$DESKTOP_ENTRY_PATH" <<EOF
+[Desktop Entry]
+Type=Application
+Name=$APP_DISPLAY_NAME
+Comment=Run Codex on Linux (unofficial helper)
+Exec=$RUN_LAUNCHER
+Icon=electron
+Terminal=false
+Path=$ROOT_DIR
+StartupNotify=true
+Categories=Development;Utility;Office;
+Keywords=ai;assistant;coding;electron;
+EOF
+  chmod 644 "$DESKTOP_ENTRY_PATH"
+
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$(dirname "$DESKTOP_ENTRY_PATH")" >/dev/null 2>&1 || true
+  fi
+
+  if command -v xdg-desktop-menu >/dev/null 2>&1; then
+    xdg-desktop-menu forceupdate >/dev/null 2>&1 || true
+  fi
+}
+
 ensure_codex_cli() {
   if have codex; then
     return
@@ -508,6 +545,12 @@ print_next() {
   echo "Launcher: $RUN_LAUNCHER"
   echo "Start:    $RUN_LAUNCHER"
   echo "No sandbox: CODEX_NO_SANDBOX=1 $RUN_LAUNCHER"
+  if [ "$INSTALL_DESKTOP_ENTRY" = "1" ]; then
+    echo "Desktop:  $DESKTOP_ENTRY_PATH"
+    echo "Open in rofi: rofi -show drun"
+  else
+    echo "Desktop:  not installed (use --install-desktop)"
+  fi
   echo "Project data: $ROOT_DIR"
 
   if have codex; then
@@ -556,6 +599,11 @@ main() {
   fi
 
   write_launcher
+  if [ "$INSTALL_DESKTOP_ENTRY" = "1" ]; then
+    ensure_desktop_entry
+  else
+    warn "Skipping desktop entry creation (--no-desktop)"
+  fi
   ensure_codex_cli
   print_next
 }
