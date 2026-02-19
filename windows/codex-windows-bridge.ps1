@@ -15,7 +15,7 @@ $ErrorActionPreference = "Stop"
 trap {
   $line = $_.InvocationInfo.ScriptLineNumber
   $text = $_.InvocationInfo.Line
-  Write-Error "Script failed at line $line: $text`n$($_.Exception.Message)"
+  Write-Error "Script failed at line ${line}: $text`n$($_.Exception.Message)"
   exit 1
 }
 
