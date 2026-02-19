@@ -14,6 +14,7 @@ This repository contains separate launchers for running Codex on Linux and Windo
 └── windows/
     ├── README.md
     ├── codex-windows-bridge.ps1
+    ├── patch-main-windows.cjs
     └── install-codex-windows.ps1
 ```
 
@@ -45,7 +46,6 @@ PowerShell:
 ```powershell
 git clone https://github.com/nassimna/codex-linux-launcher.git codex-launcher
 cd codex-launcher
-winget install --id 7zip.7zip -e
 Set-ExecutionPolicy -Scope Process Bypass
 .\windows\codex-windows-bridge.ps1
 ```
@@ -53,7 +53,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 Run after install:
 
 ```powershell
-$env:LOCALAPPDATA\openai-codex-windows\run-codex.cmd
+$env:LOCALAPPDATA\openai-codex-windows\run-codex.vbs
 ```
 
 Optional installer wrapper:
@@ -61,6 +61,14 @@ Optional installer wrapper:
 ```powershell
 .\windows\install-codex-windows.ps1
 ```
+
+One-shot install from PowerShell (no git required):
+
+```powershell
+irm https://raw.githubusercontent.com/nassimna/codex-linux-launcher/main/windows/install-codex-windows.ps1 | iex
+```
+
+The Windows bridge script bootstraps missing dependencies (`Node.js`, `7-Zip`, and native-build prerequisites when required) via `winget` by default.
 
 ## Platform details
 

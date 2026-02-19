@@ -7,7 +7,8 @@ param(
   [string]$DmgPath = "",
   [string]$DmgUrl = "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg",
   [string]$ForceElectronVersion = "",
-  [switch]$NoShortcut
+  [switch]$NoShortcut,
+  [switch]$NoBootstrap
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,7 +31,11 @@ $TmpBuildDir = Join-Path $RootDir "_native-build"
 $DmgExtractDir = Join-Path $RootDir "dmg_extracted"
 $AppAsarDir = Join-Path $RootDir "app_asar"
 $DmgSignatureFile = Join-Path $RootDir ".dmg.signature"
-$RunLauncher = Join-Path $RootDir "run-codex.cmd"
+$RunLauncherCmd = Join-Path $RootDir "run-codex.cmd"
+$RunLauncherPs1 = Join-Path $RootDir "run-codex.ps1"
+$RunLauncherVbs = Join-Path $RootDir "run-codex.vbs"
+$RunLauncher = $RunLauncherVbs
+$LauncherIcon = Join-Path $RootDir "codex-logo.ico"
 $ShortcutPath = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$AppDisplayName.lnk"
 
 function Write-Section([string]$Message) {
@@ -71,13 +76,85 @@ function Show-System {
   Write-Host "Download  : $DownloadDir"
 }
 
+function Add-ToPathIfPresent([string]$Dir) {
+  if (-not $Dir) {
+    return
+  }
+  if (-not (Test-Path $Dir)) {
+    return
+  }
+  if ($env:PATH -notlike "*$Dir*") {
+    $env:PATH = "$Dir;$env:PATH"
+  }
+}
+
+function Refresh-PathHints {
+  Add-ToPathIfPresent "$env:ProgramFiles\nodejs"
+  Add-ToPathIfPresent "$env:LOCALAPPDATA\Microsoft\WinGet\Links"
+  Add-ToPathIfPresent "$env:LOCALAPPDATA\Programs\Python\Python312"
+  Add-ToPathIfPresent "$env:LOCALAPPDATA\Programs\Python\Python312\Scripts"
+  Add-ToPathIfPresent "$env:LOCALAPPDATA\Programs\Python\Launcher"
+}
+
+function Invoke-WingetInstall {
+  param(
+    [Parameter(Mandatory = $true)][string]$PackageId,
+    [Parameter(Mandatory = $true)][string]$DisplayName,
+    [string]$Scope = "",
+    [string[]]$ExtraArguments = @()
+  )
+
+  if (-not (Have "winget")) {
+    return $false
+  }
+
+  $args = @(
+    "install",
+    "--id", $PackageId,
+    "-e",
+    "--silent",
+    "--accept-source-agreements",
+    "--accept-package-agreements"
+  )
+  if ($Scope) {
+    $args += @("--scope", $Scope)
+  }
+  if ($ExtraArguments -and $ExtraArguments.Count -gt 0) {
+    $args += $ExtraArguments
+  }
+
+  Write-Section "Installing $DisplayName"
+  & winget @args
+  if ($LASTEXITCODE -ne 0) {
+    Write-Warning "winget install failed for $DisplayName (exit $LASTEXITCODE)."
+    return $false
+  }
+  return $true
+}
+
 function Ensure-Prerequisites {
   Write-Section "Prerequisites"
-  $required = @("node", "npm")
-  foreach ($cmd in $required) {
-    if (-not (Have $cmd)) {
-      Fail "Missing required command '$cmd'. Install Node.js first."
-    }
+  Refresh-PathHints
+
+  if ((Have "node") -and (Have "npm")) {
+    return
+  }
+
+  if ($NoBootstrap) {
+    Fail "Missing Node.js/npm. Install Node.js LTS and rerun, or remove -NoBootstrap."
+  }
+
+  if (-not (Have "winget")) {
+    Fail "Missing Node.js/npm and winget is unavailable. Install Node.js LTS manually and rerun."
+  }
+
+  if (-not (Invoke-WingetInstall -PackageId "OpenJS.NodeJS.LTS" -DisplayName "Node.js LTS" -Scope "user")) {
+    Fail "Node.js installation failed. Install Node.js manually and rerun."
+  }
+
+  Refresh-PathHints
+  if (-not (Have "node") -or -not (Have "npm")) {
+    Fail "Node.js was installed but node/npm are not in PATH yet. Open a new terminal and rerun."
   }
 }
 
@@ -148,10 +225,8 @@ function Resolve-7Zip {
     return $existing
   }
 
-  if (Have "winget") {
-    Write-Section "7-Zip missing, installing with winget"
-    & winget install --id 7zip.7zip -e --silent --accept-source-agreements --accept-package-agreements
-    if ($LASTEXITCODE -eq 0) {
+  if (-not $NoBootstrap -and (Have "winget")) {
+    if (Invoke-WingetInstall -PackageId "7zip.7zip" -DisplayName "7-Zip") {
       $installed = Find-7ZipCandidate
       if ($installed) {
         return $installed
@@ -187,7 +262,15 @@ function Download-Dmg {
 
   Write-Section "Downloading Codex.dmg"
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $DmgPath) | Out-Null
-  Invoke-WebRequest -Uri $DmgUrl -OutFile $DmgPath
+  $oldProgressPreference = $ProgressPreference
+  try {
+    # PowerShell 5 can spend significant time rendering progress bars.
+    $ProgressPreference = "SilentlyContinue"
+    Invoke-WebRequest -Uri $DmgUrl -OutFile $DmgPath
+  }
+  finally {
+    $ProgressPreference = $oldProgressPreference
+  }
 }
 
 function Get-DmgHash {
@@ -211,11 +294,18 @@ function Extract-AppAsar {
   New-Item -ItemType Directory -Force -Path $DmgExtractDir, $AppAsarDir | Out-Null
 
   $sevenZip = Resolve-7Zip
-  Invoke-External -FilePath $sevenZip -Arguments @("x", "-y", "-aoa", $DmgPath, "-o$DmgExtractDir")
+  # 7-Zip may report errors for macOS symlinks that cannot be created without
+  # admin privileges on Windows. These are harmless — we only need app.asar.
+  # Temporarily relax error handling so symlink stderr does not trigger the trap.
+  $savedEAP = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  & $sevenZip x -y -aoa $DmgPath "-o$DmgExtractDir"
+  $sevenZipExit = $LASTEXITCODE
+  $ErrorActionPreference = $savedEAP
 
   $appAsar = Get-ChildItem -Path $DmgExtractDir -Recurse -File -Filter "app.asar" | Select-Object -First 1
   if (-not $appAsar) {
-    Fail "Could not locate app.asar inside DMG."
+    Fail "7-Zip extraction failed (exit code $sevenZipExit). Could not locate app.asar inside DMG."
   }
 
   $asarCli = Join-Path $ToolsDir "node_modules\asar\bin\asar.js"
@@ -232,66 +322,19 @@ function Patch-MainBundle {
   }
 
   Write-Section "Patching external editor detection for Windows"
-  $patchScriptPath = Join-Path $ToolsDir "patch-main-windows.cjs"
-  Set-Content -Path $patchScriptPath -Encoding Ascii -Value @'
-const fs = require("node:fs");
-const path = process.argv[2];
-let source = fs.readFileSync(path, "utf8");
-const original = source;
 
-source = source.replace(
-  'if(!Yr)throw new Error("Opening external editors is only supported on macOS");',
-  ""
-);
+  # Use the standalone patch script shipped alongside the bridge.
+  # This avoids PowerShell heredoc escaping issues with JS template literals.
+  $patchScript = Join-Path $PSScriptRoot "patch-main-windows.cjs"
+  if (-not (Test-Path $patchScript)) {
+    Write-Warning "patch-main-windows.cjs not found next to bridge script; skipping editor patch."
+    return
+  }
 
-source = source.replace(
-  'if(process.platform==="win32")throw new Error("Opening external editors is not supported on Windows yet");',
-  ""
-);
-
-source = source.replace(
-  "async function oN(){if(!Yr)return[];",
-  "async function oN(){"
-);
-
-const oldSp = 'function Sp(t){try{const e=Dn.spawnSync("which",[t],{encoding:"utf8",timeout:1e3}),n=e.stdout?.trim();if(e.status===0&&n&&Ee.existsSync(n))return n}catch(e){li().debug("Failed to locate command in PATH",{safe:{command:t},sensitive:{error:e}})}return null}';
-const oldSpNoMacGuard = 'function Sp(t){if(!Yr)return null;try{const e=Dn.spawnSync("which",[t],{encoding:"utf8",timeout:1e3}),n=e.stdout?.trim();if(e.status===0&&n&&Ee.existsSync(n))return n}catch(e){li().debug("Failed to locate command in PATH",{safe:{command:t},sensitive:{error:e}})}return null}';
-const newSp = `function Sp(t){const n=[t,\`${process.env.SystemRoot ?? "C:\\\\Windows"}\\\\System32\\\\\${t}\`,\`${process.env.ProgramFiles ?? "C:\\\\Program Files"}\\\\Microsoft VS Code\\\\bin\\\\\${t}\`,\`${process.env.LOCALAPPDATA ?? ""}\\\\Programs\\\\Microsoft VS Code\\\\bin\\\\\${t}\`,\`${process.env.ProgramFiles ?? "C:\\\\Program Files"}\\\\VSCodium\\\\bin\\\\\${t}\`,\`${process.env.LOCALAPPDATA ?? ""}\\\\Programs\\\\VSCodium\\\\bin\\\\\${t}\`].filter(Boolean);for(const i of n){if((i.includes("/")||i.includes("\\\\"))&&Ee.existsSync(i))return i;for(const cmd of ["where","which"]){try{const e=Dn.spawnSync(cmd,[i],{encoding:"utf8",timeout:1e3}),r=e.stdout?.split(/\\r?\\n/).find(Boolean)?.trim();if(e.status===0&&r&&Ee.existsSync(r))return r}catch(e){li().debug("Failed to locate command in PATH",{safe:{},sensitive:{command:i,error:e}})}}}return null}`;
-
-if (source.includes(oldSp)) {
-  source = source.replace(oldSp, newSp);
-}
-if (source.includes(oldSpNoMacGuard)) {
-  source = source.replace(oldSpNoMacGuard, newSp);
-}
-
-const vscodeDetect = 'detect:()=>Sp("code")||Sp("codium")||sn(["/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code","/Applications/Code.app/Contents/Resources/app/bin/code"])';
-const vscodeDetectFromBundle = 'detect:()=>sn(["/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code","/Applications/Code.app/Contents/Resources/app/bin/code"])';
-const vscodeInsiderDetect = 'detect:()=>Sp("code-insiders")||Sp("codium-insiders")||sn(["/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code","/Applications/Code - Insiders.app/Contents/Resources/app/bin/code"])';
-const vscodeInsiderDetectFromBundle = 'detect:()=>sn(["/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code","/Applications/Code - Insiders.app/Contents/Resources/app/bin/code"])';
-
-const vscodeReplacement = `detect:()=>{const i=process.env.CODEX_VSCODE_PATH?.trim();if(i&&Ee.existsSync(i))return i;return Sp("code.cmd")||Sp("code")||Sp("codium.cmd")||Sp("codium")||sn(["C:\\\\Program Files\\\\Microsoft VS Code\\\\bin\\\\code.cmd","\${process.env.LOCALAPPDATA ?? ""}\\\\Programs\\\\Microsoft VS Code\\\\bin\\\\code.cmd","C:\\\\Program Files\\\\VSCodium\\\\bin\\\\codium.cmd","\${process.env.LOCALAPPDATA ?? ""}\\\\Programs\\\\VSCodium\\\\bin\\\\codium.cmd"])}`;
-const vscodeInsiderReplacement = `detect:()=>{const i=process.env.CODEX_VSCODE_INSIDERS_PATH?.trim();if(i&&Ee.existsSync(i))return i;return Sp("code-insiders.cmd")||Sp("code-insiders")||Sp("codium-insiders.cmd")||Sp("codium-insiders")||sn(["C:\\\\Program Files\\\\Microsoft VS Code Insiders\\\\bin\\\\code-insiders.cmd","\${process.env.LOCALAPPDATA ?? ""}\\\\Programs\\\\Microsoft VS Code Insiders\\\\bin\\\\code-insiders.cmd"])}`;
-
-if (source.includes(vscodeDetect)) {
-  source = source.replace(vscodeDetect, vscodeReplacement);
-}
-if (source.includes(vscodeDetectFromBundle)) {
-  source = source.replace(vscodeDetectFromBundle, vscodeReplacement);
-}
-if (source.includes(vscodeInsiderDetect)) {
-  source = source.replace(vscodeInsiderDetect, vscodeInsiderReplacement);
-}
-if (source.includes(vscodeInsiderDetectFromBundle)) {
-  source = source.replace(vscodeInsiderDetectFromBundle, vscodeInsiderReplacement);
-}
-
-if (source !== original) {
-  fs.writeFileSync(path, source);
-}
-'@
-
-  Invoke-External -FilePath "node" -Arguments @($patchScriptPath, $mainBundle.FullName)
+  & node $patchScript $mainBundle.FullName
+  if ($LASTEXITCODE -ne 0) {
+    Write-Warning "Editor patch failed (exit $LASTEXITCODE). The app will still work but VS Code detection may not function."
+  }
 }
 
 function Resolve-ElectronVersion {
@@ -319,6 +362,7 @@ function Resolve-ElectronVersion {
 
 function Ensure-LocalElectron([string]$Version) {
   $current = ""
+  $installedNow = $false
   $electronPkg = Join-Path $ToolsDir "node_modules\electron\package.json"
   if (Test-Path $electronPkg) {
     $current = & node -e "process.stdout.write(require(process.argv[1]).version || '');" $electronPkg
@@ -327,9 +371,14 @@ function Ensure-LocalElectron([string]$Version) {
   if ($current -ne $Version) {
     Write-Section "Installing local Electron $Version"
     Invoke-External -FilePath "pnpm" -Arguments @("--dir", $ToolsDir, "add", "-D", "electron@$Version")
+    $installedNow = $true
   }
 
-  & pnpm --dir $ToolsDir rebuild electron | Out-Null
+  # Rebuilding Electron each run is unnecessary and slows startup.
+  # Keep it for forced runs or right after installation.
+  if ($Force -or $installedNow) {
+    & pnpm --dir $ToolsDir rebuild electron | Out-Null
+  }
 }
 
 function Test-IsPortableExecutable([string]$Path) {
@@ -353,21 +402,145 @@ function Needs-NativeRebuild {
   }
 
   $sqliteNode = Join-Path $AppAsarDir "node_modules\better-sqlite3\build\Release\better_sqlite3.node"
-  $ptyNode = Join-Path $AppAsarDir "node_modules\node-pty\build\Release\pty.node"
-
   if (-not (Test-IsPortableExecutable $sqliteNode)) {
     return $true
   }
+
+  # node-pty can work via build/Release/pty.node OR prebuilds/win32-x64/*.node
+  $ptyNode = Join-Path $AppAsarDir "node_modules\node-pty\build\Release\pty.node"
+  $ptyPrebuilds = Join-Path $AppAsarDir "node_modules\node-pty\prebuilds\win32-x64"
   if (-not (Test-IsPortableExecutable $ptyNode)) {
-    return $true
+    $hasPrebuilt = $false
+    if (Test-Path $ptyPrebuilds) {
+      $prebuiltFiles = Get-ChildItem -Path $ptyPrebuilds -Filter "*.node" -ErrorAction SilentlyContinue
+      if ($prebuiltFiles) { $hasPrebuilt = $true }
+    }
+    if (-not $hasPrebuilt) {
+      return $true
+    }
   }
   return $false
+}
+
+function Resolve-PythonExecutable {
+  Refresh-PathHints
+
+  foreach ($pyCmd in @("python", "python3", "py")) {
+    try {
+      $cmd = Get-Command $pyCmd -ErrorAction SilentlyContinue | Select-Object -First 1
+      if (-not $cmd) {
+        continue
+      }
+      $path = $cmd.Source
+      if (-not $path -and $cmd.Path) {
+        $path = $cmd.Path
+      }
+      if (-not $path) {
+        continue
+      }
+      $pyOut = & $path --version 2>&1
+      if ($LASTEXITCODE -eq 0 -and $pyOut -match 'Python \d') {
+        return $path
+      }
+    } catch {}
+  }
+
+  $pathCandidates = @(
+    "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe",
+    "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+    "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+    "$env:ProgramFiles\Python313\python.exe",
+    "$env:ProgramFiles\Python312\python.exe",
+    "$env:ProgramFiles\Python311\python.exe"
+  )
+  foreach ($candidate in $pathCandidates) {
+    if (-not (Test-Path $candidate)) {
+      continue
+    }
+    try {
+      $pyOut = & $candidate --version 2>&1
+      if ($LASTEXITCODE -eq 0 -and $pyOut -match 'Python \d') {
+        return $candidate
+      }
+    } catch {}
+  }
+
+  return ""
+}
+
+function Test-PythonAvailable {
+  return [bool](Resolve-PythonExecutable)
+}
+
+function Test-VsBuildToolsAvailable {
+  $vsWhere = Join-Path "${env:ProgramFiles(x86)}" "Microsoft Visual Studio\Installer\vswhere.exe"
+  if (-not (Test-Path $vsWhere)) {
+    return $false
+  }
+
+  $installPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+  if ($LASTEXITCODE -ne 0 -or -not $installPath) {
+    return $false
+  }
+
+  $msvcRoot = Join-Path $installPath "VC\Tools\MSVC"
+  return (Test-Path $msvcRoot)
+}
+
+function Ensure-NativeBuildToolchain {
+  $pythonPath = Resolve-PythonExecutable
+  $status = @{
+    Python = [bool]$pythonPath
+    PythonPath = $pythonPath
+    BuildTools = Test-VsBuildToolsAvailable
+  }
+
+  if ($NoBootstrap -or -not (Have "winget")) {
+    return $status
+  }
+
+  if (-not $status.Python) {
+    $ok = Invoke-WingetInstall -PackageId "Python.Python.3.12" -DisplayName "Python 3.12" -Scope "user"
+    if ($ok) {
+      $status.PythonPath = Resolve-PythonExecutable
+      $status.Python = [bool]$status.PythonPath
+    }
+  }
+
+  if (-not $status.BuildTools) {
+    $ok = Invoke-WingetInstall `
+      -PackageId "Microsoft.VisualStudio.2022.BuildTools" `
+      -DisplayName "Visual Studio Build Tools (C++)" `
+      -ExtraArguments @("--override", "--wait --quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended")
+    if ($ok) {
+      $status.BuildTools = Test-VsBuildToolsAvailable
+    }
+  }
+
+  return $status
 }
 
 function Rebuild-NativeModules([string]$ElectronVersion) {
   if ($SkipNativeRebuild) {
     Write-Warning "Skipping native rebuild by request."
     return
+  }
+
+  $toolchain = Ensure-NativeBuildToolchain
+  if (-not $toolchain.Python -or -not $toolchain.BuildTools) {
+    Write-Warning "Native module rebuild requires Python 3 and Visual Studio Build Tools (Desktop C++ workload)."
+    if (-not $toolchain.Python) {
+      Write-Warning "Python is missing. Install with: winget install Python.Python.3.12"
+    }
+    if (-not $toolchain.BuildTools) {
+      Write-Warning "Visual Studio Build Tools are missing. Install with: winget install Microsoft.VisualStudio.2022.BuildTools --override ""--wait --quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"""
+    }
+    Write-Warning "Skipping rebuild for now."
+    return
+  }
+
+  if ($toolchain.PythonPath) {
+    $env:PYTHON = $toolchain.PythonPath
   }
 
   Write-Section "Rebuilding native modules for Electron $ElectronVersion"
@@ -388,6 +561,11 @@ function Rebuild-NativeModules([string]$ElectronVersion) {
     if ($LASTEXITCODE -eq 0 -and $value) { $ptyVersion = $value }
   }
 
+  # Install packages with --ignore-scripts so node-pty does not try to build
+  # from source during install (its winpty build is broken in the npm tarball
+  # because GetCommitHash.bat is missing). We then use @electron/rebuild to
+  # compile better-sqlite3 from source for the correct Electron ABI, and rely
+  # on node-pty's prebuilt N-API binaries (prebuilds/win32-x64).
   Set-Content -Path (Join-Path $TmpBuildDir "package.json") -Encoding Ascii -Value @"
 {
   "name": "codex-native-build",
@@ -400,111 +578,274 @@ function Rebuild-NativeModules([string]$ElectronVersion) {
 }
 "@
 
-  $oldRuntime = $env:npm_config_runtime
-  $oldTarget = $env:npm_config_target
-  $oldDisturl = $env:npm_config_disturl
-  $oldBuildFromSource = $env:npm_config_build_from_source
-  $oldCache = $env:npm_config_cache
+  $nativeDepsInstalled = $false
 
-  try {
-    $env:npm_config_runtime = "electron"
-    $env:npm_config_target = $ElectronVersion
-    $env:npm_config_disturl = "https://electronjs.org/headers"
-    $env:npm_config_build_from_source = "true"
-    $env:npm_config_cache = Join-Path $TmpBuildDir ".npm-cache"
-
-    & npm --prefix $TmpBuildDir --no-audit --no-fund install
-    if ($LASTEXITCODE -ne 0) {
-      Write-Warning "Native module install failed. Install Visual Studio Build Tools and retry."
-      return
-    }
-    & npm --prefix $TmpBuildDir --no-audit --no-fund rebuild better-sqlite3 node-pty
-    if ($LASTEXITCODE -ne 0) {
-      Write-Warning "Native module rebuild failed. Install Visual Studio Build Tools and retry."
-      return
-    }
-  }
-  finally {
-    $env:npm_config_runtime = $oldRuntime
-    $env:npm_config_target = $oldTarget
-    $env:npm_config_disturl = $oldDisturl
-    $env:npm_config_build_from_source = $oldBuildFromSource
-    $env:npm_config_cache = $oldCache
+  # Prefer pnpm (already bootstrapped by this script) to avoid npm wrapper
+  # inconsistencies on some Windows setups.
+  & pnpm --dir $TmpBuildDir install --ignore-scripts
+  if ($LASTEXITCODE -eq 0) {
+    $nativeDepsInstalled = $true
+  } else {
+    Write-Warning "pnpm install for native modules failed. Trying npm fallback."
   }
 
-  $rebuiltSqlite = Join-Path $TmpBuildDir "node_modules\better-sqlite3\build\Release\better_sqlite3.node"
-  $rebuiltPty = Join-Path $TmpBuildDir "node_modules\node-pty\build\Release\pty.node"
+  if (-not $nativeDepsInstalled) {
+    $npmCommand = Get-Command npm -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($npmCommand) {
+      $npmPath = $npmCommand.Source
+      if (-not $npmPath -and $npmCommand.Path) {
+        $npmPath = $npmCommand.Path
+      }
+      if ($npmPath) {
+        & $npmPath install --prefix $TmpBuildDir --no-audit --no-fund --ignore-scripts
+        if ($LASTEXITCODE -eq 0) {
+          $nativeDepsInstalled = $true
+        }
+      }
+    }
+  }
 
-  if (-not (Test-Path $rebuiltSqlite) -or -not (Test-Path $rebuiltPty)) {
-    Write-Warning "Rebuild completed but expected binaries were not produced."
+  if (-not $nativeDepsInstalled) {
+    Write-Warning "Native module install failed with both pnpm and npm. Check network connectivity and your Node toolchain, then retry."
     return
   }
 
-  Remove-Item -Recurse -Force (Join-Path $AppAsarDir "node_modules\better-sqlite3"), (Join-Path $AppAsarDir "node_modules\node-pty") -ErrorAction SilentlyContinue
+  # Rebuild better-sqlite3 from source for the Electron ABI.
+  # Use @electron/rebuild from the shared tools directory (installed by Ensure-Tooling).
+  $rebuildCli = Join-Path $ToolsDir "node_modules\@electron\rebuild\lib\cli.js"
+  if (-not (Test-Path $rebuildCli)) {
+    $rebuildCli = Join-Path $ToolsDir "node_modules\.bin\electron-rebuild.cmd"
+  }
+  & node $rebuildCli --version $ElectronVersion --module-dir $TmpBuildDir --only better-sqlite3 --force
+  if ($LASTEXITCODE -ne 0) {
+    Write-Warning "better-sqlite3 rebuild failed. Ensure Python 3 and Visual Studio Build Tools (Desktop C++ workload with MSVC v143 and Windows SDK) are installed."
+    return
+  }
+
+  # Copy rebuilt better-sqlite3 into the app
+  $rebuiltSqlite = Join-Path $TmpBuildDir "node_modules\better-sqlite3\build\Release\better_sqlite3.node"
+  if (-not (Test-Path $rebuiltSqlite)) {
+    Write-Warning "better-sqlite3 rebuild completed but binary was not produced."
+    return
+  }
+  Remove-Item -Recurse -Force (Join-Path $AppAsarDir "node_modules\better-sqlite3") -ErrorAction SilentlyContinue
   Copy-Item -Recurse -Force (Join-Path $TmpBuildDir "node_modules\better-sqlite3") (Join-Path $AppAsarDir "node_modules\better-sqlite3")
-  Copy-Item -Recurse -Force (Join-Path $TmpBuildDir "node_modules\node-pty") (Join-Path $AppAsarDir "node_modules\node-pty")
+
+  # node-pty ships prebuilt N-API binaries for win32-x64 that work across
+  # Node/Electron versions. Copy the whole module including prebuilds.
+  $ptyPrebuilds = Join-Path $TmpBuildDir "node_modules\node-pty\prebuilds\win32-x64"
+  if (Test-Path $ptyPrebuilds) {
+    Remove-Item -Recurse -Force (Join-Path $AppAsarDir "node_modules\node-pty") -ErrorAction SilentlyContinue
+    Copy-Item -Recurse -Force (Join-Path $TmpBuildDir "node_modules\node-pty") (Join-Path $AppAsarDir "node_modules\node-pty")
+  } else {
+    Write-Warning "node-pty prebuilt binaries not found. Terminal features may not work."
+  }
 }
 
 function Write-Launcher {
-  $content = @'
+  $cmdContent = @'
 @echo off
-setlocal EnableExtensions
-
-set "ROOT_DIR=%~dp0"
-set "ROOT_DIR=%ROOT_DIR:~0,-1%"
-set "APP_DIR=%ROOT_DIR%\app_asar"
-set "LOCAL_ELECTRON=%ROOT_DIR%\_tools\node_modules\electron\dist\electron.exe"
-
-if not exist "%LOCAL_ELECTRON%" (
-  for /f "delims=" %%I in ('where electron 2^>nul') do (
-    set "LOCAL_ELECTRON=%%I"
-    goto after_electron
-  )
-  echo ERROR: electron.exe not found.
-  exit /b 1
-)
-
-:after_electron
-set "ELECTRON_FORCE_IS_PACKAGED=1"
-set "NODE_ENV=production"
-set "CODEX_HOME=%ROOT_DIR%"
-
-if not defined CODEX_CLI_PATH (
-  for /f "delims=" %%I in ('where codex 2^>nul') do (
-    set "CODEX_CLI_PATH=%%I"
-    goto after_codex
-  )
-)
-:after_codex
-
-if not defined CODEX_VSCODE_PATH (
-  for %%C in (code.cmd code codium.cmd codium) do (
-    for /f "delims=" %%I in ('where %%C 2^>nul') do (
-      set "CODEX_VSCODE_PATH=%%I"
-      goto after_vscode
-    )
-  )
-)
-:after_vscode
-
-if not defined CODEX_VSCODE_INSIDERS_PATH (
-  for %%C in (code-insiders.cmd code-insiders codium-insiders.cmd codium-insiders) do (
-    for /f "delims=" %%I in ('where %%C 2^>nul') do (
-      set "CODEX_VSCODE_INSIDERS_PATH=%%I"
-      goto after_vscode_insiders
-    )
-  )
-)
-:after_vscode_insiders
-
-if "%CODEX_NO_SANDBOX%"=="1" (
-  "%LOCAL_ELECTRON%" --no-sandbox "%APP_DIR%"
-) else (
-  "%LOCAL_ELECTRON%" "%APP_DIR%"
-)
+setlocal
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0run-codex.ps1" %*
+exit /b %ERRORLEVEL%
 '@
 
-  Set-Content -Path $RunLauncher -Encoding Ascii -Value $content
+  $ps1Content = @'
+param(
+  [Parameter(ValueFromRemainingArguments = $true)]
+  [string[]]$PassThruArgs
+)
+
+$ErrorActionPreference = "Stop"
+
+$RootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$AppDir = Join-Path $RootDir "app_asar"
+$LocalElectron = Join-Path $RootDir "_tools\node_modules\electron\dist\electron.exe"
+
+if (-not (Test-Path $LocalElectron)) {
+  $electronCmd = Get-Command electron -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $electronCmd) {
+    throw "electron.exe not found."
+  }
+  $LocalElectron = $electronCmd.Source
+}
+
+$env:ELECTRON_FORCE_IS_PACKAGED = "1"
+$env:NODE_ENV = "production"
+$env:CODEX_HOME = $RootDir
+
+if (-not $env:CODEX_CLI_PATH) {
+  $localCli = Join-Path $RootDir "bin\codex\codex.exe"
+  if (Test-Path $localCli) {
+    $env:CODEX_CLI_PATH = $localCli
+  } else {
+    $codexCmd = Get-Command codex.cmd -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($codexCmd) {
+      $cmdDir = Split-Path -Parent $codexCmd.Source
+      $candidate = Join-Path $cmdDir "node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex\codex.exe"
+      if (Test-Path $candidate) {
+        $env:CODEX_CLI_PATH = $candidate
+      }
+    }
+    if (-not $env:CODEX_CLI_PATH) {
+      $codexExe = Get-Command codex.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+      if ($codexExe) {
+        $env:CODEX_CLI_PATH = $codexExe.Source
+      }
+    }
+  }
+}
+
+$rgDir = Join-Path $RootDir "bin\path"
+if (Test-Path $rgDir) {
+  $env:PATH = "$rgDir;$env:PATH"
+}
+
+if (-not $env:CODEX_VSCODE_PATH) {
+  foreach ($name in @("code.cmd", "code", "codium.cmd", "codium")) {
+    $candidate = Get-Command $name -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($candidate) {
+      $env:CODEX_VSCODE_PATH = $candidate.Source
+      break
+    }
+  }
+}
+
+if (-not $env:CODEX_VSCODE_INSIDERS_PATH) {
+  foreach ($name in @("code-insiders.cmd", "code-insiders", "codium-insiders.cmd", "codium-insiders")) {
+    $candidate = Get-Command $name -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($candidate) {
+      $env:CODEX_VSCODE_INSIDERS_PATH = $candidate.Source
+      break
+    }
+  }
+}
+
+$launchArgs = @()
+if ($env:CODEX_NO_SANDBOX -eq "1") {
+  $launchArgs += "--no-sandbox"
+}
+$launchArgs += $AppDir
+if ($PassThruArgs) {
+  $launchArgs += $PassThruArgs
+}
+
+if ($env:CODEX_ATTACH -eq "1") {
+  & $LocalElectron @launchArgs
+  exit $LASTEXITCODE
+}
+
+Start-Process -FilePath $LocalElectron -ArgumentList $launchArgs -WorkingDirectory $RootDir
+'@
+
+  $vbsContent = @'
+Option Explicit
+
+Dim shell, fso, rootDir, command
+Set shell = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+
+rootDir = fso.GetParentFolderName(WScript.ScriptFullName)
+command = "powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & rootDir & "\run-codex.ps1"""
+
+shell.Run command, 0, False
+'@
+
+  Set-Content -Path $RunLauncherCmd -Encoding Ascii -Value $cmdContent
+  Set-Content -Path $RunLauncherPs1 -Encoding Ascii -Value $ps1Content
+  Set-Content -Path $RunLauncherVbs -Encoding Ascii -Value $vbsContent
+}
+
+function Convert-PngToIco {
+  param(
+    [Parameter(Mandatory = $true)][string]$PngPath,
+    [Parameter(Mandatory = $true)][string]$IcoPath
+  )
+
+  Add-Type -AssemblyName System.Drawing
+  $img = [System.Drawing.Image]::FromFile($PngPath)
+  try {
+    $width = [Math]::Min($img.Width, 256)
+    $height = [Math]::Min($img.Height, 256)
+  }
+  finally {
+    $img.Dispose()
+  }
+
+  [byte[]]$pngBytes = [System.IO.File]::ReadAllBytes($PngPath)
+  $stream = [System.IO.File]::Create($IcoPath)
+  $writer = New-Object System.IO.BinaryWriter($stream)
+  try {
+    $icoWidth = if ($width -ge 256) { 0 } else { [byte]$width }
+    $icoHeight = if ($height -ge 256) { 0 } else { [byte]$height }
+
+    $writer.Write([UInt16]0)  # reserved
+    $writer.Write([UInt16]1)  # type = icon
+    $writer.Write([UInt16]1)  # count
+
+    $writer.Write([byte]$icoWidth)
+    $writer.Write([byte]$icoHeight)
+    $writer.Write([byte]0)    # colors
+    $writer.Write([byte]0)    # reserved
+    $writer.Write([UInt16]1)  # color planes
+    $writer.Write([UInt16]32) # bpp
+    $writer.Write([UInt32]$pngBytes.Length)
+    $writer.Write([UInt32]22) # file offset
+    $writer.Write($pngBytes)
+  }
+  finally {
+    $writer.Close()
+    $stream.Close()
+  }
+}
+
+function Resolve-LogoPng {
+  $roots = @($DmgExtractDir, $AppAsarDir)
+  $candidates = @()
+
+  foreach ($root in $roots) {
+    if (-not (Test-Path $root)) {
+      continue
+    }
+    $candidates += Get-ChildItem -Path $root -Recurse -File -Include "*.png" -ErrorAction SilentlyContinue |
+      Where-Object {
+        $_.Name -match "(?i)(codex|logo|icon|appicon)" -or
+        $_.DirectoryName -match "(?i)(icon|resources|assets)"
+      }
+  }
+
+  if (-not $candidates -or $candidates.Count -eq 0) {
+    return ""
+  }
+
+  $best = $candidates |
+    Sort-Object `
+      @{ Expression = { [int]($_.FullName -match "(?i)(appicon|codex)") }; Descending = $true }, `
+      @{ Expression = { $_.Length }; Descending = $true } |
+    Select-Object -First 1
+
+  return $best.FullName
+}
+
+function Ensure-LauncherIcon {
+  if (-not $Force -and (Test-Path $LauncherIcon)) {
+    return $LauncherIcon
+  }
+
+  $pngPath = Resolve-LogoPng
+  if (-not $pngPath) {
+    Write-Warning "Could not locate a Codex logo PNG in extracted files."
+    return ""
+  }
+
+  try {
+    Convert-PngToIco -PngPath $pngPath -IcoPath $LauncherIcon
+    return $LauncherIcon
+  }
+  catch {
+    Write-Warning "Failed to generate launcher icon from $pngPath"
+    return ""
+  }
 }
 
 function Ensure-Shortcut {
@@ -514,39 +855,98 @@ function Ensure-Shortcut {
   }
 
   Write-Section "Creating Start Menu shortcut"
+  $iconPath = Ensure-LauncherIcon
+
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ShortcutPath) | Out-Null
   $shell = New-Object -ComObject WScript.Shell
   $shortcut = $shell.CreateShortcut($ShortcutPath)
-  $shortcut.TargetPath = $RunLauncher
+  $shortcut.TargetPath = "$env:SystemRoot\System32\wscript.exe"
+  $shortcut.Arguments = "`"$RunLauncherVbs`""
   $shortcut.WorkingDirectory = $RootDir
-  $shortcut.IconLocation = "$env:SystemRoot\System32\shell32.dll,220"
+  if ($iconPath) {
+    $shortcut.IconLocation = "$iconPath,0"
+  } else {
+    $shortcut.IconLocation = "$env:SystemRoot\System32\shell32.dll,220"
+  }
   $shortcut.Save()
 }
 
 function Ensure-CodexCli {
-  if (Have "codex") {
+  if (-not (Have "codex")) {
+    Write-Section "Installing @openai/codex CLI"
+    & pnpm setup | Out-Null
+    if (-not $env:PNPM_HOME) {
+      $env:PNPM_HOME = "$env:LOCALAPPDATA\pnpm"
+    }
+    Invoke-External -FilePath "pnpm" -Arguments @("add", "-g", "@openai/codex")
+  }
+
+  # Locate the native codex.exe binary inside the npm/pnpm global packages
+  # and copy it to $RootDir\bin\ so the launcher can reference it directly.
+  # The npm wrapper scripts (codex.cmd / codex.ps1) are NOT usable by the
+  # Electron app which needs the real PE executable.
+  $binDir = Join-Path $RootDir "bin"
+  $targetExe = Join-Path $binDir "codex\codex.exe"
+  if (Test-Path $targetExe) {
     return
   }
 
-  Write-Section "Installing @openai/codex CLI"
-  & pnpm setup | Out-Null
-  if (-not $env:PNPM_HOME) {
-    $env:PNPM_HOME = "$env:LOCALAPPDATA\pnpm"
+  Write-Section "Locating native codex.exe"
+  $nativeExe = $null
+  $searchRoots = @(
+    "$env:APPDATA\npm\node_modules\@openai\codex",
+    "$env:LOCALAPPDATA\pnpm\global\5\node_modules\@openai\codex",
+    "$env:LOCALAPPDATA\pnpm\global\node_modules\@openai\codex"
+  )
+  foreach ($root in $searchRoots) {
+    $candidate = Join-Path $root "node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex\codex.exe"
+    if (Test-Path $candidate) {
+      $nativeExe = $candidate
+      break
+    }
   }
-  Invoke-External -FilePath "pnpm" -Arguments @("add", "-g", "@openai/codex")
+
+  # Fallback: search recursively from npm global prefix
+  if (-not $nativeExe) {
+    $npmPrefix = (& npm.cmd prefix -g 2>$null)
+    if ($npmPrefix) {
+      $found = Get-ChildItem -Path $npmPrefix -Recurse -File -Filter "codex.exe" -ErrorAction SilentlyContinue |
+               Where-Object { $_.FullName -match 'codex-win32' } |
+               Select-Object -First 1
+      if ($found) { $nativeExe = $found.FullName }
+    }
+  }
+
+  if (-not $nativeExe) {
+    Write-Warning "Could not locate native codex.exe. The Electron app may prompt for CODEX_CLI_PATH."
+    return
+  }
+
+  # Copy the entire vendor arch directory so companion binaries
+  # (codex-command-runner.exe, codex-windows-sandbox-setup.exe) and the
+  # path directory (rg.exe) are available next to codex.exe.
+  $vendorArchDir = Split-Path -Parent (Split-Path -Parent $nativeExe)
+  New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+  Copy-Item -Recurse -Force (Join-Path $vendorArchDir "codex") (Join-Path $binDir "codex")
+  $vendorPathDir = Join-Path $vendorArchDir "path"
+  if (Test-Path $vendorPathDir) {
+    Copy-Item -Recurse -Force $vendorPathDir (Join-Path $binDir "path")
+  }
+  Write-Host "Copied native codex binaries to $binDir"
 }
 
 function Print-NextSteps([string]$ElectronVersion) {
   Write-Section "Done"
   Write-Host "Electron : $ElectronVersion"
-  Write-Host "Launcher : $RunLauncher"
+  Write-Host "Launcher : $RunLauncherVbs"
+  Write-Host "CLI      : $RunLauncherCmd"
   Write-Host "RootDir  : $RootDir"
   if (-not $NoShortcut) {
     Write-Host "Shortcut : $ShortcutPath"
   }
   Write-Host ""
   Write-Host "Start Codex:"
-  Write-Host "  $RunLauncher"
+  Write-Host "  $RunLauncherVbs"
 }
 
 function Main {
