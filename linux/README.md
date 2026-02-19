@@ -13,16 +13,16 @@ This folder contains the Linux-specific implementation that adapts the official 
 From repository root:
 
 ```bash
-git clone https://github.com/nassimna/codex-linux-launcher.git \
-  && cd codex-linux-launcher \
-  && chmod +x linux/codex-linux-bridge.sh \
-  && ./linux/codex-linux-bridge.sh
+git clone https://github.com/nassimna/codex-linux-launcher.git codex-launcher
+cd codex-launcher
+chmod +x linux/codex-linux-bridge.sh
+./linux/codex-linux-bridge.sh
 ```
 
 Or with curl:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nassimna/codex-linux-launcher/main/install-codex.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nassimna/codex-linux-launcher/main/linux/install-codex-linux.sh | bash
 ```
 
 ## What this script does
@@ -55,7 +55,7 @@ Run it with:
 ## Update flow
 
 ```bash
-cd /path/to/codex-linux-launcher
+cd /path/to/codex-launcher
 ./linux/codex-linux-bridge.sh --force
 ```
 

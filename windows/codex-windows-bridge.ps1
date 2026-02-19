@@ -92,13 +92,20 @@ function Ensure-Pnpm {
   Invoke-External -FilePath "npm" -Arguments @("i", "-g", "pnpm")
 }
 
-function Resolve-7Zip {
+function Find-7ZipCandidate {
   $candidates = @(
     "7z",
     "7zz",
-    "C:\Program Files\7-Zip\7z.exe",
-    "C:\Program Files\7-Zip\7zz.exe"
-  )
+    "$env:ProgramFiles\7-Zip\7z.exe",
+    "$env:ProgramFiles\7-Zip\7zz.exe",
+    "${env:ProgramFiles(x86)}\7-Zip\7z.exe",
+    "${env:ProgramFiles(x86)}\7-Zip\7zz.exe",
+    "$env:LOCALAPPDATA\Programs\7-Zip\7z.exe",
+    "$env:LOCALAPPDATA\Programs\7-Zip\7zz.exe",
+    "$env:ChocolateyInstall\bin\7z.exe",
+    "$env:ChocolateyInstall\bin\7zz.exe"
+  ) | Where-Object { $_ -and $_.Trim() -ne "" }
+
   foreach ($candidate in $candidates) {
     $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
     if ($cmd) {
@@ -109,7 +116,35 @@ function Resolve-7Zip {
     }
   }
 
-  Fail "7-Zip not found. Install 7-Zip and ensure '7z' is on PATH."
+  $wingetPackageRoots = Get-ChildItem -Path "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Directory -Filter "7zip.7zip_*" -ErrorAction SilentlyContinue
+  foreach ($root in $wingetPackageRoots) {
+    $matches = Get-ChildItem -Path $root.FullName -Recurse -File -Filter "7z.exe" -ErrorAction SilentlyContinue
+    if ($matches) {
+      return $matches[0].FullName
+    }
+  }
+
+  return ""
+}
+
+function Resolve-7Zip {
+  $existing = Find-7ZipCandidate
+  if ($existing) {
+    return $existing
+  }
+
+  if (Have "winget") {
+    Write-Section "7-Zip missing, installing with winget"
+    & winget install --id 7zip.7zip -e --silent --accept-source-agreements --accept-package-agreements
+    if ($LASTEXITCODE -eq 0) {
+      $installed = Find-7ZipCandidate
+      if ($installed) {
+        return $installed
+      }
+    }
+  }
+
+  Fail "7-Zip not found. Install it with: winget install --id 7zip.7zip -e"
 }
 
 function Ensure-Tooling {

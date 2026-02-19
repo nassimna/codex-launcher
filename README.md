@@ -1,6 +1,6 @@
-# Codex Launcher (Linux + Windows)
+# Codex Launcher (Unofficial)
 
-This repository contains unofficial portability helpers for running Codex on Linux and Windows, with each platform isolated into its own folder.
+This repository contains separate launchers for running Codex on Linux and Windows.
 
 ## Repository structure
 
@@ -11,41 +11,58 @@ This repository contains unofficial portability helpers for running Codex on Lin
 │   ├── codex-linux-bridge.sh
 │   ├── codex-macos-to-linux.sh
 │   └── install-codex-linux.sh
-├── windows/
-│   ├── README.md
-│   ├── codex-windows-bridge.ps1
-│   └── install-codex-windows.ps1
-├── codex-linux-bridge.sh        # compatibility wrapper -> linux/
-├── codex-macos-to-linux.sh      # compatibility wrapper -> linux/
-└── install-codex.sh             # compatibility installer wrapper -> linux/
+└── windows/
+    ├── README.md
+    ├── codex-windows-bridge.ps1
+    └── install-codex-windows.ps1
 ```
 
-## Platform docs
-
-- Linux: `linux/README.md`
-- Windows: `windows/README.md`
-
-## Quick start
-
-Linux:
+## Linux install and run
 
 ```bash
+git clone https://github.com/nassimna/codex-linux-launcher.git codex-launcher
+cd codex-launcher
+chmod +x linux/codex-linux-bridge.sh
 ./linux/codex-linux-bridge.sh
 ```
 
-Windows (PowerShell):
+Run after install:
+
+```bash
+~/.local/share/openai-codex-linux/run-codex.sh
+```
+
+Optional one-liner installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nassimna/codex-linux-launcher/main/linux/install-codex-linux.sh | bash
+```
+
+## Windows install and run
+
+PowerShell:
 
 ```powershell
+git clone https://github.com/nassimna/codex-linux-launcher.git codex-launcher
+cd codex-launcher
+winget install --id 7zip.7zip -e
 Set-ExecutionPolicy -Scope Process Bypass
 .\windows\codex-windows-bridge.ps1
 ```
 
-## Backward compatibility
+Run after install:
 
-Root scripts are kept to avoid breaking old commands:
+```powershell
+$env:LOCALAPPDATA\openai-codex-windows\run-codex.cmd
+```
 
-- `./codex-linux-bridge.sh`
-- `./codex-macos-to-linux.sh`
-- `./install-codex.sh`
+Optional installer wrapper:
 
-These wrappers now delegate to the `linux/` folder.
+```powershell
+.\windows\install-codex-windows.ps1
+```
+
+## Platform details
+
+- Linux details: `linux/README.md`
+- Windows details: `windows/README.md`

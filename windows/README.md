@@ -1,6 +1,6 @@
 # Windows Launcher (Unofficial)
 
-This folder contains a **Windows-specific** launcher flow so it stays separate from the Linux scripts in the repository root.
+This folder contains the Windows-specific launcher flow.
 
 ## Files
 
@@ -22,17 +22,19 @@ This folder contains a **Windows-specific** launcher flow so it stays separate f
 - PowerShell 5+ (PowerShell 7 recommended)
 - Node.js + npm
 - 7-Zip (`7z` available in PATH or default install path)
+  - If missing, the script tries to install it automatically via `winget`.
+  - Manual install command: `winget install --id 7zip.7zip -e`
 - For native rebuilds:
   - Visual Studio Build Tools (Desktop C++ workload)
   - Python 3
 
 ## Run
 
-From this folder:
+From repository root:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\codex-windows-bridge.ps1
+.\windows\codex-windows-bridge.ps1
 ```
 
 Then launch:
@@ -44,11 +46,11 @@ $env:LOCALAPPDATA\openai-codex-windows\run-codex.cmd
 ## Common options
 
 ```powershell
-.\codex-windows-bridge.ps1 -Force
-.\codex-windows-bridge.ps1 -SkipNativeRebuild
-.\codex-windows-bridge.ps1 -RootDir "D:\Apps\openai-codex-windows"
-.\codex-windows-bridge.ps1 -NoShortcut
-.\codex-windows-bridge.ps1 -ForceElectronVersion "37.3.0"
+.\windows\codex-windows-bridge.ps1 -Force
+.\windows\codex-windows-bridge.ps1 -SkipNativeRebuild
+.\windows\codex-windows-bridge.ps1 -RootDir "D:\Apps\openai-codex-windows"
+.\windows\codex-windows-bridge.ps1 -NoShortcut
+.\windows\codex-windows-bridge.ps1 -ForceElectronVersion "37.3.0"
 ```
 
 ## Notes
