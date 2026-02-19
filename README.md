@@ -4,6 +4,21 @@ This project contains a single Bash script that adapts the official `Codex.dmg` 
 
 It is an **unofficial helper**, built for development use. You still need a valid Codex account/CLI for the app itself.
 
+## Install (one-time)
+
+```bash
+git clone <your-repo-url> \
+  && cd codex-linux-launcher \
+  && chmod +x codex-linux-bridge.sh \
+  && ./codex-linux-bridge.sh
+```
+
+After install, launch with:
+
+```bash
+~/.local/share/openai-codex-linux/run-codex.sh
+```
+
 ## What this script does
 
 1. Downloads (or reuses) `Codex.dmg`.
