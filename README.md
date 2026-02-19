@@ -7,7 +7,7 @@ It is an **unofficial helper**, built for development use. You still need a vali
 ## Install (one-time)
 
 ```bash
-git clone <your-repo-url> \
+git clone https://github.com/nassimna/codex-linux-launcher.git \
   && cd codex-linux-launcher \
   && chmod +x codex-linux-bridge.sh \
   && ./codex-linux-bridge.sh
@@ -16,12 +16,8 @@ git clone <your-repo-url> \
 If you prefer `curl` instead of `git`:
 
 ```bash
-curl -fsSL <your-raw-install-url> | bash
+curl -fsSL https://raw.githubusercontent.com/nassimna/codex-linux-launcher/main/install-codex.sh | bash
 ```
-
-where `<your-raw-install-url>` points to a hosted install script (for example
-`https://raw.githubusercontent.com/<owner>/<repo>/main/install-codex.sh`).
-If the install URL is provided from your own repo, this is the one command users can run.
 
 After install, launch with:
 
@@ -47,13 +43,14 @@ After install, launch with:
 
 - `codex-linux-bridge.sh` (primary script)
 - `codex-macos-to-linux.sh` (compatibility wrapper; kept intentionally for older references)
+- `install-codex.sh` (curl one-line installer)
 - `.gitignore`
 
 ## Quick start
 
 ```bash
 # 1) clone
-# git clone <your-repo-url>
+# git clone https://github.com/nassimna/codex-linux-launcher.git
 # cd codex-linux-launcher
 
 # 2) make executable
@@ -165,7 +162,7 @@ To publish this as a repo:
 
 ```bash
 git init
-# git remote add origin <your-repo-url>
+# git remote add origin https://github.com/nassimna/codex-linux-launcher.git
 git add README.md codex-linux-bridge.sh codex-macos-to-linux.sh .gitignore
 
 git commit -m "feat: add Linux launcher for Codex DMG"
