@@ -1,180 +1,148 @@
-# codex-macos-to-linux
+# Codex Linux Launcher
 
-A practical Linux bootstrap script that turns the official `Codex.dmg` package into a runnable Linux setup by extracting `app.asar` and preparing a local Electron runtime.
+This project contains a single Bash script that adapts the official `Codex.dmg` package to run on Linux.
 
-> This is an **unofficial** helper script. It uses a macOS Codex DMG as the source artifact and adapts it for Linux use.
+It is an **unofficial helper**, built for development use. You still need a valid Codex account/CLI for the app itself.
 
-## Why this exists
+## What this script does
 
-You asked for a Linux-friendly, reusable version of the original one-off script. This repo now contains:
+1. Downloads (or reuses) `Codex.dmg`.
+2. Extracts `app.asar` and unpacks it into a writable workspace.
+3. Selects a compatible Electron runtime.
+4. Installs/updates required dependencies.
+5. Builds Linux native modules (`better-sqlite3`, `node-pty`) for your Electron ABI.
+6. Patches the app bundle so external editor detection includes:
+   - `code`
+   - `codium`
+   - `code-insiders`
+   - `codium-insiders`
+7. Generates a runnable launcher script and a desktop file for application menus.
 
-- a clear launcher name: `codex-macos-to-linux.sh`
-- distro-aware dependency handling
-- reproducible workspace paths
-- optional offline updates
-- generated runnable launcher `run-codex.sh`
+## Files
 
-## Repository structure
-
-- `codex-macos-to-linux.sh` – bootstrap script
-- `README.md` – this file
-
-## Requirements
-
-You need either:
-
-- sudo access (optional, for package install)
-- internet access for download/rebuild
-- one terminal shell (bash)
-
-At runtime the script looks for:
-
-- `curl`, `git`, `node`, `npm` (`pnpm` is installed automatically)
-- `make`, `gcc`, `g++` for native module rebuilds
-- a DMG extractor (`7z`/`p7zip`, fallback to bundled 7-Zip CLI)
+- `codex-linux-bridge.sh` (primary script)
+- `codex-macos-to-linux.sh` (compatibility wrapper; kept intentionally for older references)
+- `.gitignore`
 
 ## Quick start
 
 ```bash
-chmod +x codex-macos-to-linux.sh
-./codex-macos-to-linux.sh
+# 1) clone
+# git clone <your-repo-url>
+# cd codex-linux-launcher
+
+# 2) make executable
+chmod +x codex-linux-bridge.sh
+
+# 3) run first time
+./codex-linux-bridge.sh
 ```
 
-First run:
-- checks missing system tools and (if needed) installs them with your package manager,
-- downloads `Codex.dmg` to `~/Downloads/codex-macos-to-linux/Codex.dmg`,
-- extracts `app.asar`,
-- installs matching local Electron package,
-- rebuilds Linux native modules (`better-sqlite3`, `node-pty`) when needed,
-- writes a launcher at:
+The first run prints detected versions, installs missing system tools (optional), extracts the app, rebuilds native modules, and creates:
 
-```
-~/.local/share/codex-macos-to-linux/run-codex.sh
-```
+- `~/.local/share/openai-codex-linux/run-codex.sh`
+- `~/.local/share/applications/openai-codex-linux.desktop`
 
-Run the app:
+Run it:
 
 ```bash
-~/.local/share/codex-macos-to-linux/run-codex.sh
+~/.local/share/openai-codex-linux/run-codex.sh
 ```
 
-Create a desktop menu entry (so it appears in rofi/drun, app menus):
+Optional: make it globally callable:
 
 ```bash
-./codex-macos-to-linux.sh --install-desktop
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$PWD/codex-linux-bridge.sh" "$HOME/.local/bin/codex-launcher"
 ```
 
-Open rofi with:
+## Update flow
+
+When OpenAI releases a new DMG, rerun in place:
 
 ```bash
-rofi -show drun
+cd /path/to/codex-linux-launcher
+./codex-linux-bridge.sh --force
 ```
 
-If it still does not appear immediately:
+`--force` re-downloads/re-extracts and forces a rebuild.
+
+## Frequently used options
+
+```bash
+./codex-linux-bridge.sh [options]
+
+--force                   re-run extraction and native rebuild
+--skip-system-deps         do not attempt package installation
+--root-dir PATH           workspace path (default ~/.local/share/openai-codex-linux)
+--download-dir PATH       where to store Codex.dmg
+--dmg-path PATH           use a specific downloaded DMG
+--force-electron-version   override detected Electron version
+--install-desktop          write/overwrite desktop entry (default: on)
+--no-desktop              skip desktop entry creation
+--help                    show usage
+```
+
+## Desktop entry and rofi
+
+If it does not appear in `rofi -show drun` immediately:
 
 ```bash
 update-desktop-database ~/.local/share/applications
 xdg-desktop-menu forceupdate
 ```
 
-If you already had a stale entry, regenerate after updates:
+The desktop file path is:
+
+`$HOME/.local/share/applications/openai-codex-linux.desktop`
+
+## Editor integration
+
+The launcher exports environment variables into the Electron process:
+
+- `CODEX_VSCODE_PATH`
+- `CODEX_VSCODE_INSIDERS_PATH`
+- `CODEX_CLI_PATH`
+
+If you want to force a specific binary:
 
 ```bash
-./codex-macos-to-linux.sh --force
+CODEX_VSCODE_PATH=/usr/bin/code \
+CODEX_VSCODE_INSIDERS_PATH=/usr/bin/code-insiders \
+~/.local/share/openai-codex-linux/run-codex.sh
 ```
 
-If sandbox blocks startup on your distro, try:
+## Notes for native modules
+
+Builds can fail on non-standard toolchains. Install dependencies once globally if needed:
+
+- `python` (`python3`)
+- `gcc`, `g++`, `make`
+- `p7zip` or `7z`
+- `node`, `npm` (or `corepack` + `pnpm`)
+
+Native module install in this script uses non-interactive `npm` rebuild commands internally to avoid `pnpm` script-approval prompts.
+
+## Why this can break
+
+- Scripted extraction from `DMG` is a portability workaround, not an official Linux distribution.
+- DMG internals can change.
+- Native module ABI must match the app's Electron version.
+- Linux security policies or older OS images may require adjusting permissions.
+
+## Recommended run as non-root
+
+Run this script as a normal user. Elevated rights are used only when installing system packages.
+
+## GitHub setup
+
+To publish this as a repo:
 
 ```bash
-CODEX_NO_SANDBOX=1 ~/.local/share/codex-macos-to-linux/run-codex.sh
+git init
+# git remote add origin <your-repo-url>
+git add README.md codex-linux-bridge.sh codex-macos-to-linux.sh .gitignore
+
+git commit -m "feat: add Linux launcher for Codex DMG"
+# git push -u origin main
 ```
-
-## Script options
-
-```bash
-./codex-macos-to-linux.sh [options]
-```
-
-- `--force` : re-extract and rebuild even if nothing changed
-- `--skip-system-deps` : skip automatic package installation
-- `--root-dir PATH` : override workspace directory (default `~/.local/share/codex-macos-to-linux`)
-- `--download-dir PATH` : override where `Codex.dmg` is downloaded
-- `--dmg-path PATH` : set explicit DMG location
-- `--force-electron-version X.Y.Z` : manually set Electron version
-- `--install-desktop` : write/overwrite desktop menu entry (default: on)
-- `--no-desktop` : skip menu entry creation
-- `--help` : show option list
-
-## Environment variables
-
-- `FORCE` (0/1)
-- `SKIP_SYSTEM_DEPS` (0/1)
-- `ROOT_APP_DIR`
-- `DOWNLOAD_DIR`
-- `DMG_PATH`
-- `FORCE_ELECTRON_VERSION`
-- `PNPM_HOME`
-
-These are useful in automation or CI setups.
-
-## How it works (high level)
-
-1. **System check**
-   - prints distro/kernel/arch details and checks required tools.
-2. **Download**
-   - grabs official DMG from OpenAI-hosted URL.
-3. **Extract**
-   - extracts DMG and finds `app.asar`.
-4. **Unpack app.asar**
-   - extracts app tree into the local workspace.
-5. **Resolve Electron version**
-   - from DMG `Info.plist` when available, otherwise existing Electron binary fallback.
-6. **Install matching Electron tools**
-   - local `_tools/node_modules/electron` version aligned to the app.
-7. **Native modules**
-   - validates `better-sqlite3` / `node-pty` native binaries and rebuilds for the detected Electron ABI when needed.
-8. **Launcher creation**
-   - writes `run-codex.sh` with sane defaults and `CODEX_HOME`.
-9. **CLI optional install**
-   - attempts `pnpm i -g @openai/codex`.
-
-## Update flow
-
-To update the application package later:
-
-- Download/update DMG manually
-- re-run:
-
-```bash
-./codex-macos-to-linux.sh --force
-```
-
-This replaces `app_asar` with the latest archive and reruns module rebuild steps.
-
-If you only changed source flags/paths but not app content, run normal mode and it will skip full extraction when DMG hash is unchanged.
-
-## Making it an install-style command (optional)
-
-```bash
-ln -s "$(pwd)/codex-macos-to-linux.sh" "$HOME/.local/bin/codex-macos-to-linux"
-```
-
-Ensure `~/.local/bin` is in PATH.
-
-## Risk and compatibility notes
-
-- This is a workaround script. It is **not** an official cross-platform Codex build channel.
-- Native module rebuild may fail on unusual toolchains/architectures.
-- On non-x86_64 architectures behavior is best-effort only.
-
-## Troubleshooting
-
-- If `npm_config` errors appear during rebuild, confirm:
-  - `python3`, `make`, `gcc`, `g++` are installed
-  - system headers are available
-- If launch fails with missing shared libraries, verify local Electron path:
-  - `~/.local/share/codex-macos-to-linux/_tools/node_modules/electron/dist/electron`
-- If CLI is missing, run:
-  - `pnpm setup`
-  - `pnpm i -g @openai/codex`
-  - add `PNPM_HOME` to PATH
