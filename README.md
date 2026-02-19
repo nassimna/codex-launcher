@@ -13,6 +13,16 @@ git clone <your-repo-url> \
   && ./codex-linux-bridge.sh
 ```
 
+If you prefer `curl` instead of `git`:
+
+```bash
+curl -fsSL <your-raw-install-url> | bash
+```
+
+where `<your-raw-install-url>` points to a hosted install script (for example
+`https://raw.githubusercontent.com/<owner>/<repo>/main/install-codex.sh`).
+If the install URL is provided from your own repo, this is the one command users can run.
+
 After install, launch with:
 
 ```bash
