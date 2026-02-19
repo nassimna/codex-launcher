@@ -10,8 +10,14 @@ param(
   [switch]$NoShortcut
 )
 
-Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+trap {
+  $line = $_.InvocationInfo.ScriptLineNumber
+  $text = $_.InvocationInfo.Line
+  Write-Error "Script failed at line $line: $text`n$($_.Exception.Message)"
+  exit 1
+}
 
 if (-not $DmgPath) {
   $DmgPath = Join-Path $DownloadDir "Codex.dmg"
@@ -107,9 +113,18 @@ function Find-7ZipCandidate {
   ) | Where-Object { $_ -and $_.Trim() -ne "" }
 
   foreach ($candidate in $candidates) {
-    $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
-    if ($cmd) {
-      return $cmd.Source
+    $commandInfo = Get-Command $candidate -ErrorAction SilentlyContinue
+    if ($commandInfo) {
+      if ($commandInfo -is [System.Array]) {
+        $commandInfo = $commandInfo[0]
+      }
+      $resolvedPath = $commandInfo.Source
+      if (-not $resolvedPath -and $commandInfo.Path) {
+        $resolvedPath = $commandInfo.Path
+      }
+      if ($resolvedPath) {
+        return $resolvedPath
+      }
     }
     if (Test-Path $candidate) {
       return $candidate
@@ -118,9 +133,9 @@ function Find-7ZipCandidate {
 
   $wingetPackageRoots = Get-ChildItem -Path "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Directory -Filter "7zip.7zip_*" -ErrorAction SilentlyContinue
   foreach ($root in $wingetPackageRoots) {
-    $matches = Get-ChildItem -Path $root.FullName -Recurse -File -Filter "7z.exe" -ErrorAction SilentlyContinue
-    if ($matches) {
-      return $matches[0].FullName
+    $foundExecutables = Get-ChildItem -Path $root.FullName -Recurse -File -Filter "7z.exe" -ErrorAction SilentlyContinue
+    if ($foundExecutables) {
+      return $foundExecutables[0].FullName
     }
   }
 
