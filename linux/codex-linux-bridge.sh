@@ -430,6 +430,147 @@ if (source !== original) {
 NODE
 }
 
+patch_background_terminal_stop() {
+  local webview_index web_bundle_rel web_bundle
+
+  webview_index="$APP_ASAR_DIR/webview/index.html"
+  web_bundle_rel=""
+  web_bundle=""
+
+  if [ -f "$webview_index" ]; then
+    web_bundle_rel="$(grep -oE 'assets/index-[^"]+\.js' "$webview_index" | head -n 1 || true)"
+  fi
+
+  if [ -n "$web_bundle_rel" ] && [ -f "$APP_ASAR_DIR/webview/$web_bundle_rel" ]; then
+    web_bundle="$APP_ASAR_DIR/webview/$web_bundle_rel"
+  else
+    web_bundle="$(find "$APP_ASAR_DIR/webview/assets" -maxdepth 1 -name 'index-*.js' -type f -print | head -n 1 || true)"
+  fi
+
+  if [ -z "$web_bundle" ]; then
+    warn "No webview index-*.js bundle found; skipping background terminal Stop patch"
+    return
+  fi
+
+  node - <<'NODE' "$web_bundle"
+const fs = require("node:fs");
+
+const bundlePath = process.argv[2];
+if (!bundlePath) process.exit(0);
+
+let source = fs.readFileSync(bundlePath, "utf8");
+const original = source;
+
+function findMatchingBrace(text, openBraceIndex) {
+  let depth = 0;
+  let inSingle = false;
+  let inDouble = false;
+  let inTemplate = false;
+  let escape = false;
+  for (let i = openBraceIndex; i < text.length; i += 1) {
+    const ch = text[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escape = true;
+      continue;
+    }
+    if (inSingle) {
+      if (ch === "'") inSingle = false;
+      continue;
+    }
+    if (inDouble) {
+      if (ch === '"') inDouble = false;
+      continue;
+    }
+    if (inTemplate) {
+      if (ch === "`") inTemplate = false;
+      continue;
+    }
+    if (ch === "'") {
+      inSingle = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDouble = true;
+      continue;
+    }
+    if (ch === "`") {
+      inTemplate = true;
+      continue;
+    }
+    if (ch === "{") depth += 1;
+    if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+let patchedStopButton = false;
+let patchedCleanupHandler = false;
+
+const dispatcherMatch = source.match(/([A-Za-z_$][\w$]*)\.dispatchMessage\("terminal-close",\{sessionId:/);
+const dispatchVar = dispatcherMatch?.[1] ?? null;
+
+const panelPropsMatch = source.match(/backgroundTerminals:([A-Za-z_$][\w$]*),isCleaningBackgroundTerminals:([A-Za-z_$][\w$]*),onCleanBackgroundTerminals:([A-Za-z_$][\w$]*)/);
+if (panelPropsMatch) {
+  const [, terminalsVar, , stopVar] = panelPropsMatch;
+  const stopAssignRe = new RegExp(`${stopVar}=\\(\\)=>\\{`);
+  const stopAssignMatch = stopAssignRe.exec(source);
+  if (stopAssignMatch) {
+    const fnStart = stopAssignMatch.index;
+    const openBrace = source.indexOf("{", fnStart);
+    const closeBrace = findMatchingBrace(source, openBrace);
+    if (openBrace !== -1 && closeBrace !== -1) {
+      const fnSource = source.slice(fnStart, closeBrace + 1);
+      if (!fnSource.includes(`(${terminalsVar}).catch(()=>{`)) {
+        const cleanCallMatch = fnSource.match(
+          /([A-Za-z_$][\w$]*)\(\)\.catch\(\(\)=>\{[A-Za-z_$][\w$]*\.danger\([A-Za-z_$][\w$]*\.formatMessage\(\{id:"composer\.cleanBackgroundTerminals\.error"/
+        );
+        if (cleanCallMatch) {
+          const cleanFnVar = cleanCallMatch[1];
+          const patchedFnSource = fnSource.replace(
+            `${cleanFnVar}().catch(()=>{`,
+            `${cleanFnVar}(${terminalsVar}).catch(()=>{`
+          );
+          if (patchedFnSource !== fnSource) {
+            source = source.slice(0, fnStart) + patchedFnSource + source.slice(closeBrace + 1);
+            patchedStopButton = true;
+          }
+        }
+      }
+    }
+  }
+}
+
+if (dispatchVar) {
+  const cleanHandlerRefMatch = source.match(/onStop:([A-Za-z_$][\w$]*),onCleanBackgroundTerminals:([A-Za-z_$][\w$]*)/);
+  if (cleanHandlerRefMatch) {
+    const cleanHandlerVar = cleanHandlerRefMatch[2];
+    const cleanHandlerRe = new RegExp(
+      `${cleanHandlerVar}=async\\(\\)=>\\{([A-Za-z_$][\\\\w$]*)\\?\\.type==="local"&&await ([A-Za-z_$][\\\\w$]*)\\.cleanBackgroundTerminals\\(\\1\\.localConversationId\\)\\}`
+    );
+    source = source.replace(cleanHandlerRe, (_, followUpVar, managerVar) => {
+      patchedCleanupHandler = true;
+      return `${cleanHandlerVar}=async(H)=>{if(${followUpVar}?.type!=="local")return;await ${managerVar}.cleanBackgroundTerminals(${followUpVar}.localConversationId);for(const B of(H??[])){const z=B?.id;typeof z=="string"&&z.length>0&&${dispatchVar}.dispatchMessage("terminal-close",{sessionId:z})}}`;
+    });
+  }
+}
+
+if (source !== original) {
+  fs.writeFileSync(bundlePath, source);
+  const updates = [];
+  if (patchedStopButton) updates.push("stop-click handler");
+  if (patchedCleanupHandler) updates.push("cleanup handler");
+  console.log(`[codex-linux] Patched background terminal stop fallback (${updates.join(", ")}).`);
+}
+NODE
+}
+
 resolve_electron_version() {
   if [ -n "$ELECTRON_VERSION_OVERRIDE" ]; then
     echo "$ELECTRON_VERSION_OVERRIDE"
@@ -719,6 +860,7 @@ main() {
   ensure_archive_tool
   find_and_extract_asar
   patch_main_js_linux_open_target
+  patch_background_terminal_stop
 
   local version
   version="$(resolve_electron_version)"
