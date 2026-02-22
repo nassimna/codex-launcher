@@ -571,6 +571,39 @@ if (source !== original) {
 NODE
 }
 
+patch_mcp_install_auth() {
+  local mcp_bundle
+  mcp_bundle="$(find "$APP_ASAR_DIR/webview/assets" -maxdepth 1 -name 'mcp-settings-*.js' -type f -print | head -n 1 || true)"
+
+  if [ -z "$mcp_bundle" ]; then
+    warn "No mcp-settings-*.js bundle found; skipping MCP install/authenticate patch"
+    return
+  fi
+
+  node - <<'NODE' "$mcp_bundle"
+const fs = require("node:fs");
+
+const bundlePath = process.argv[2];
+if (!bundlePath) process.exit(0);
+
+let source = fs.readFileSync(bundlePath, "utf8");
+const original = source;
+
+const oldInstallAndAuth = 'Qe=async a=>{U(r=>({...r,[a.id]:!0})),await V(a),G(a.id)}';
+const newInstallAndAuth = 'Qe=async a=>{U(r=>({...r,[a.id]:!0}));const x=!!i[a.id];await V(a);x||await ee(a.id);G(a.id)}';
+
+if (source.includes(newInstallAndAuth)) process.exit(0);
+if (!source.includes(oldInstallAndAuth)) process.exit(0);
+
+source = source.replace(oldInstallAndAuth, newInstallAndAuth);
+
+if (source !== original) {
+  fs.writeFileSync(bundlePath, source);
+  console.log("[codex-linux] Patched MCP install/authenticate click fallback.");
+}
+NODE
+}
+
 resolve_electron_version() {
   if [ -n "$ELECTRON_VERSION_OVERRIDE" ]; then
     echo "$ELECTRON_VERSION_OVERRIDE"
@@ -719,6 +752,104 @@ ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$ROOT_DIR/app_asar"
 LOCAL_ELECTRON="$ROOT_DIR/_tools/node_modules/electron/dist/electron"
 
+json_string_field() {
+  local key="$1"
+  local file="$2"
+  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]\\+\\)\".*/\\1/p" "$file" | head -n 1
+}
+
+update_command_hint() {
+  local candidates=(
+    "$HOME/codex-launcher/linux/codex-linux-bridge.sh"
+    "$HOME/codex-linux-launcher/linux/codex-linux-bridge.sh"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [ -x "$candidate" ]; then
+      printf '%s --force' "$candidate"
+      return 0
+    fi
+  done
+  printf '%s' "codex-linux-bridge.sh --force"
+}
+
+notify_update_available() {
+  local installed_version="$1"
+  local installed_build="$2"
+  local latest_version="$3"
+  local latest_build="$4"
+  local title="Codex update available"
+  local update_cmd
+  update_cmd="$(update_command_hint)"
+  local body
+  printf -v body 'Installed: %s (build %s)\nLatest: %s (build %s)\nRun: %s' \
+    "$installed_version" "$installed_build" "$latest_version" "$latest_build" "$update_cmd"
+
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send -a "OpenAI Codex" "$title" "$body" || true
+  fi
+
+  printf 'INFO: %s\n%s\n' "$title" "$body" >&2
+}
+
+notify_up_to_date() {
+  local installed_version="$1"
+  local installed_build="$2"
+  local latest_version="$3"
+  local latest_build="$4"
+  local title="Codex is up to date"
+  local body
+  printf -v body 'Installed: %s (build %s)\nLatest: %s (build %s)' \
+    "$installed_version" "$installed_build" "$latest_version" "$latest_build"
+
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send -a "OpenAI Codex" "$title" "$body" || true
+  fi
+
+  printf 'INFO: %s\n%s\n' "$title" "$body" >&2
+}
+
+check_for_updates_once() {
+  [ "${CODEX_UPDATE_CHECK:-1}" = "1" ] || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+
+  local package_json="$APP_DIR/package.json"
+  [ -f "$package_json" ] || return 0
+
+  local local_version
+  local local_build
+  local feed_url
+  local appcast
+  local remote_build
+  local remote_version
+
+  local_version="$(json_string_field "version" "$package_json")"
+  local_build="$(json_string_field "codexBuildNumber" "$package_json")"
+  feed_url="$(json_string_field "codexSparkleFeedUrl" "$package_json")"
+
+  [ -n "$feed_url" ] || feed_url="https://persistent.oaistatic.com/codex-app-prod/appcast.xml"
+  [[ "$local_build" =~ ^[0-9]+$ ]] || return 0
+
+  appcast="$(curl -fsSL --connect-timeout 3 --max-time 6 "$feed_url" 2>/dev/null || true)"
+  [ -n "$appcast" ] || return 0
+
+  remote_build="$(printf '%s\n' "$appcast" | sed -n 's#.*<sparkle:version>\([0-9][0-9]*\)</sparkle:version>.*#\1#p' | head -n 1)"
+  remote_version="$(printf '%s\n' "$appcast" | sed -n 's#.*<sparkle:shortVersionString>\([^<][^<]*\)</sparkle:shortVersionString>.*#\1#p' | head -n 1)"
+
+  [[ "$remote_build" =~ ^[0-9]+$ ]] || return 0
+  [ -n "$remote_version" ] || remote_version="unknown"
+
+  if [ "$remote_build" -gt "$local_build" ]; then
+    notify_update_available "$local_version" "$local_build" "$remote_version" "$remote_build"
+  elif [ "${CODEX_UPDATE_NOTIFY_NO_UPDATES:-1}" = "1" ]; then
+    notify_up_to_date "$local_version" "$local_build" "$remote_version" "$remote_build"
+  fi
+}
+
+check_for_updates_async() {
+  (check_for_updates_once) &
+}
+
 if [ ! -x "$LOCAL_ELECTRON" ]; then
   if command -v electron >/dev/null 2>&1; then
     LOCAL_ELECTRON="$(command -v electron)"
@@ -747,6 +878,8 @@ if [ -z "${CODEX_VSCODE_INSIDERS_PATH:-}" ]; then
     [ -n "$candidate" ] && [ -x "$candidate" ] && export CODEX_VSCODE_INSIDERS_PATH="$candidate" && break
   done
 fi
+
+check_for_updates_async
 
 if [ "${CODEX_NO_SANDBOX:-0}" = "1" ]; then
   exec "$LOCAL_ELECTRON" --no-sandbox "$APP_DIR"
@@ -861,6 +994,7 @@ main() {
   find_and_extract_asar
   patch_main_js_linux_open_target
   patch_background_terminal_stop
+  patch_mcp_install_auth
 
   local version
   version="$(resolve_electron_version)"
