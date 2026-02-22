@@ -61,6 +61,18 @@ cd /path/to/codex-launcher
 
 `--force` re-downloads/re-extracts and forces a rebuild.
 
+The generated launcher now checks the official appcast on startup and shows a desktop notification when a newer Codex build is available.
+
+- Notification library requirement: `notify-send` must be available.
+  - Arch: `sudo pacman -S libnotify`
+  - Debian/Ubuntu: `sudo apt install libnotify-bin`
+  - Fedora: `sudo dnf install libnotify`
+  - openSUSE: `sudo zypper install libnotify-tools`
+
+- Disable startup update checks: `CODEX_UPDATE_CHECK=0 ~/.local/share/openai-codex-linux/run-codex.sh`
+- Disable "up to date" notifications: `CODEX_UPDATE_NOTIFY_NO_UPDATES=0 ~/.local/share/openai-codex-linux/run-codex.sh`
+- Desktop notifications use `notify-send` (install `libnotify` if notifications are missing)
+
 ## Frequently used options
 
 ```bash
