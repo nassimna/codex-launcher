@@ -15,6 +15,9 @@ APP_ASAR_DIR="$ROOT_DIR/app_asar"
 DMG_SIGNATURE_FILE="$ROOT_DIR/.dmg.signature"
 RUN_LAUNCHER="$ROOT_DIR/run-codex.sh"
 DESKTOP_ENTRY_PATH="${DESKTOP_ENTRY_PATH:-$HOME/.local/share/applications/$APP_NAME.desktop}"
+STATE_BACKUP_DIR="${STATE_BACKUP_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/${APP_NAME}-backups}"
+STATE_BACKUP_RETENTION="${STATE_BACKUP_RETENTION:-10}"
+ENABLE_STATE_BACKUP="${ENABLE_STATE_BACKUP:-1}"
 DMG_EXTRACT_BIN=""
 DMG_PATH_WAS_SET=0
 
@@ -47,9 +50,12 @@ Options:
   --force-electron-version  Override detected Electron version
   --install-desktop        Write/overwrite desktop launcher (default: on)
   --no-desktop             Skip desktop launcher creation
+  --state-backup-dir PATH  Override state snapshot directory
+  --no-state-backup        Disable automatic state snapshot/restore
 
 Environment:
-  FORCE, SKIP_SYSTEM_DEPS, ROOT_APP_DIR, DOWNLOAD_DIR, DMG_PATH, FORCE_ELECTRON_VERSION, INSTALL_DESKTOP_ENTRY
+  FORCE, SKIP_SYSTEM_DEPS, ROOT_APP_DIR, DOWNLOAD_DIR, DMG_PATH, FORCE_ELECTRON_VERSION,
+  INSTALL_DESKTOP_ENTRY, STATE_BACKUP_DIR, STATE_BACKUP_RETENTION, ENABLE_STATE_BACKUP
 
 Examples:
   ./codex-linux-bridge.sh --force
@@ -90,6 +96,13 @@ parse_args() {
         ;;
       --no-desktop)
         INSTALL_DESKTOP_ENTRY=0
+        ;;
+      --state-backup-dir)
+        shift
+        STATE_BACKUP_DIR="${1:?missing value for --state-backup-dir}"
+        ;;
+      --no-state-backup)
+        ENABLE_STATE_BACKUP=0
         ;;
       --force-electron-version)
         shift
@@ -330,6 +343,110 @@ ensure_archive_tool() {
   cp "$candidate" "$vendor/7zz"
   chmod +x "$vendor/7zz"
   DMG_EXTRACT_BIN="$vendor/7zz"
+}
+
+state_items() {
+  cat <<'EOF'
+.codex-global-state.json
+.credentials.json
+auth.json
+config.toml
+history.jsonl
+models_cache.json
+sessions
+sqlite
+shell_snapshots
+skills
+EOF
+}
+
+prune_state_backups() {
+  [ -d "$STATE_BACKUP_DIR" ] || return 0
+
+  local keep="$STATE_BACKUP_RETENTION"
+  if ! [[ "$keep" =~ ^[0-9]+$ ]]; then
+    keep=10
+  fi
+  if [ "$keep" -lt 1 ]; then
+    keep=1
+  fi
+
+  local -a snapshots=()
+  mapfile -t snapshots < <(find "$STATE_BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -r)
+  local count="${#snapshots[@]}"
+
+  if [ "$count" -le "$keep" ]; then
+    return 0
+  fi
+
+  local idx
+  for ((idx = keep; idx < count; idx += 1)); do
+    rm -rf "$STATE_BACKUP_DIR/${snapshots[$idx]}"
+  done
+}
+
+backup_user_state_snapshot() {
+  [ "$ENABLE_STATE_BACKUP" = "1" ] || return 0
+
+  local -a existing=()
+  local item
+  while IFS= read -r item; do
+    if [ -e "$ROOT_DIR/$item" ]; then
+      existing+=("$item")
+    fi
+  done < <(state_items)
+
+  if [ "${#existing[@]}" -eq 0 ]; then
+    return 0
+  fi
+
+  mkdir -p "$STATE_BACKUP_DIR"
+  local stamp
+  local dest
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  dest="$STATE_BACKUP_DIR/$stamp"
+  mkdir -p "$dest"
+
+  for item in "${existing[@]}"; do
+    cp -a "$ROOT_DIR/$item" "$dest/"
+  done
+
+  cat > "$dest/.backup-meta" <<EOF
+created_at=$(date -Iseconds)
+root_dir=$ROOT_DIR
+app_name=$APP_NAME
+EOF
+
+  prune_state_backups
+}
+
+restore_user_state_from_latest_backup() {
+  [ "$ENABLE_STATE_BACKUP" = "1" ] || return 0
+  [ -d "$STATE_BACKUP_DIR" ] || return 0
+
+  if [ -f "$ROOT_DIR/history.jsonl" ] || [ -d "$ROOT_DIR/sessions" ] || [ -f "$ROOT_DIR/.codex-global-state.json" ]; then
+    return 0
+  fi
+
+  local latest
+  latest="$(find "$STATE_BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -r | head -n 1 || true)"
+  if [ -z "$latest" ]; then
+    return 0
+  fi
+
+  local src="$STATE_BACKUP_DIR/$latest"
+  local restored=0
+  local item
+  while IFS= read -r item; do
+    if [ -e "$src/$item" ] && [ ! -e "$ROOT_DIR/$item" ]; then
+      cp -a "$src/$item" "$ROOT_DIR/"
+      restored=$((restored + 1))
+    fi
+  done < <(state_items)
+
+  if [ "$restored" -gt 0 ]; then
+    log "Restored user state from backup snapshot: $src"
+  fi
 }
 
 find_and_extract_asar() {
@@ -979,6 +1096,7 @@ main() {
   fi
 
   mkdir -p "$ROOT_DIR" "$DOWNLOAD_DIR"
+  backup_user_state_snapshot
   ensure_system_dependencies
   ensure_pnpm
   ensure_tooling
@@ -992,6 +1110,7 @@ main() {
 
   ensure_archive_tool
   find_and_extract_asar
+  restore_user_state_from_latest_backup
   patch_main_js_linux_open_target
   patch_background_terminal_stop
   patch_mcp_install_auth

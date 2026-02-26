@@ -8,7 +8,10 @@ param(
   [string]$DmgUrl = "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg",
   [string]$ForceElectronVersion = "",
   [switch]$NoShortcut,
-  [switch]$NoBootstrap
+  [switch]$NoBootstrap,
+  [switch]$NoStateBackup,
+  [string]$StateBackupDir = "$env:LOCALAPPDATA\openai-codex-windows-backups",
+  [int]$StateBackupRetention = 10
 )
 
 $ErrorActionPreference = "Stop"
@@ -66,6 +69,109 @@ function Ensure-Directories {
   New-Item -ItemType Directory -Force -Path $RootDir | Out-Null
   New-Item -ItemType Directory -Force -Path $DownloadDir | Out-Null
   New-Item -ItemType Directory -Force -Path $ToolsDir | Out-Null
+}
+
+function Get-StateItems {
+  return @(
+    ".codex-global-state.json",
+    ".credentials.json",
+    "auth.json",
+    "config.toml",
+    "history.jsonl",
+    "models_cache.json",
+    "sessions",
+    "sqlite",
+    "shell_snapshots",
+    "skills"
+  )
+}
+
+function Prune-StateBackups {
+  if (-not (Test-Path $StateBackupDir)) {
+    return
+  }
+
+  $keep = if ($StateBackupRetention -ge 1) { $StateBackupRetention } else { 1 }
+  $snapshots = Get-ChildItem -Path $StateBackupDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
+  if (-not $snapshots -or $snapshots.Count -le $keep) {
+    return
+  }
+
+  $snapshots | Select-Object -Skip $keep | ForEach-Object {
+    Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue
+  }
+}
+
+function Backup-StateSnapshot {
+  if ($NoStateBackup) {
+    return
+  }
+
+  $existing = @()
+  foreach ($item in (Get-StateItems)) {
+    $source = Join-Path $RootDir $item
+    if (Test-Path $source) {
+      $existing += $item
+    }
+  }
+
+  if (-not $existing -or $existing.Count -eq 0) {
+    return
+  }
+
+  New-Item -ItemType Directory -Force -Path $StateBackupDir | Out-Null
+  $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+  $snapshotDir = Join-Path $StateBackupDir $stamp
+  New-Item -ItemType Directory -Force -Path $snapshotDir | Out-Null
+
+  foreach ($item in $existing) {
+    Copy-Item -Recurse -Force (Join-Path $RootDir $item) $snapshotDir
+  }
+
+  $meta = @(
+    "created_at=$((Get-Date).ToString('o'))",
+    "root_dir=$RootDir",
+    "app_name=$AppName"
+  )
+  Set-Content -Path (Join-Path $snapshotDir ".backup-meta") -Encoding Ascii -Value $meta
+
+  Prune-StateBackups
+}
+
+function Restore-StateFromLatestBackup {
+  if ($NoStateBackup) {
+    return
+  }
+  if (-not (Test-Path $StateBackupDir)) {
+    return
+  }
+
+  if ((Test-Path (Join-Path $RootDir "history.jsonl")) -or
+      (Test-Path (Join-Path $RootDir "sessions")) -or
+      (Test-Path (Join-Path $RootDir ".codex-global-state.json"))) {
+    return
+  }
+
+  $latest = Get-ChildItem -Path $StateBackupDir -Directory -ErrorAction SilentlyContinue |
+    Sort-Object Name -Descending |
+    Select-Object -First 1
+  if (-not $latest) {
+    return
+  }
+
+  $restoredCount = 0
+  foreach ($item in (Get-StateItems)) {
+    $source = Join-Path $latest.FullName $item
+    $target = Join-Path $RootDir $item
+    if ((Test-Path $source) -and -not (Test-Path $target)) {
+      Copy-Item -Recurse -Force $source $RootDir
+      $restoredCount += 1
+    }
+  }
+
+  if ($restoredCount -gt 0) {
+    Write-Section "Restored user state from backup: $($latest.FullName)"
+  }
 }
 
 function Show-System {
@@ -951,12 +1057,14 @@ function Print-NextSteps([string]$ElectronVersion) {
 
 function Main {
   Ensure-Directories
+  Backup-StateSnapshot
   Show-System
   Ensure-Prerequisites
   Ensure-Pnpm
   Ensure-Tooling
   Download-Dmg
   Extract-AppAsar
+  Restore-StateFromLatestBackup
   Patch-MainBundle
 
   $electronVersion = Resolve-ElectronVersion
