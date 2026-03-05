@@ -74,3 +74,8 @@ The Windows bridge script bootstraps missing dependencies (`Node.js`, `7-Zip`, a
 
 - Linux details: `linux/README.md`
 - Windows details: `windows/README.md`
+
+## Diff Panel Edit Test
+
+This block is intentionally added as a temporary change so you can test editing
+directly in the app diff panel.

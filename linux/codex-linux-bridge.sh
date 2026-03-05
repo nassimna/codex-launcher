@@ -479,33 +479,52 @@ find_and_extract_asar() {
 }
 
 patch_main_js_linux_open_target() {
-  local main_js
-  main_js="$(find "$APP_ASAR_DIR/.vite/build" -maxdepth 1 -name 'main-*.js' -type f -print | head -n 1 || true)"
-
-  if [ -z "$main_js" ]; then
-    warn "No main-*.js bundle found; skipping Linux editor patch"
-    return
+  local -a main_files=()
+  if [ -d "$APP_ASAR_DIR/.vite/build" ]; then
+    while IFS= read -r file; do
+      main_files+=("$file")
+    done < <(find "$APP_ASAR_DIR/.vite/build" -maxdepth 1 -type f \( -name 'main.js' -o -name 'main-*.js' \) -print | sort)
   fi
 
-  if grep -q "Opening external editors is not supported on Windows yet" "$main_js" 2>/dev/null && \
-     grep -q 'function Sp(t){const n=' "$main_js" 2>/dev/null; then
+  if [ "${#main_files[@]}" -eq 0 ]; then
+    warn "No main bundle found; skipping Linux editor patch"
     return
   fi
 
   log "Patching app bundle for Linux external editor targets (VS Code, file targets)"
-  node - <<'NODE' "$main_js"
+  local main_js
+  for main_js in "${main_files[@]}"; do
+    node - <<'NODE' "$main_js"
 const fs = require('node:fs');
+const vm = require('node:vm');
 const path = process.argv[2];
 let source = fs.readFileSync(path, 'utf8');
-
 const original = source;
+const applied = [];
 
-source = source.replace(
+function applyReplacement(name, from, to) {
+  if (!source.includes(from)) return false;
+  source = source.replace(from, () => to);
+  applied.push(name);
+  return true;
+}
+
+function applyRegexReplacement(name, re, replacement) {
+  const next = source.replace(re, replacement);
+  if (next === source) return false;
+  source = next;
+  applied.push(name);
+  return true;
+}
+
+applyReplacement(
+  "legacy-macos-guard",
   'if(!Yr)throw new Error("Opening external editors is only supported on macOS");',
   'if(process.platform==="win32")throw new Error("Opening external editors is not supported on Windows yet");'
 );
 
-source = source.replace(
+applyReplacement(
+  "legacy-editor-list-guard",
   'async function oN(){if(!Yr)return[];',
   'async function oN(){'
 );
@@ -514,37 +533,128 @@ const oldSp = 'function Sp(t){try{const e=Dn.spawnSync("which",[t],{encoding:"ut
 const oldSpNoMacGuard = 'function Sp(t){if(!Yr)return null;try{const e=Dn.spawnSync("which",[t],{encoding:"utf8",timeout:1e3}),n=e.stdout?.trim();if(e.status===0&&n&&Ee.existsSync(n))return n}catch(e){li().debug("Failed to locate command in PATH",{safe:{command:t},sensitive:{error:e}})}return null}';
 const newSp = `function Sp(t){const n=[t,\`/usr/bin/\${t}\`,\`/usr/local/bin/\${t}\`,\`/usr/share/code/bin/\${t}\`,\`/usr/share/codium/bin/\${t}\`,\`/opt/visual-studio-code/bin/\${t}\`,\`/opt/visual-studio-codium/bin/\${t}\`,\`/snap/bin/\${t}\`,\`\${process.env.HOME ?? ""}/.local/bin/\${t}\`,\`\${process.env.HOME ?? ""}/bin/\${t}\`].filter(Boolean);for(const i of n){if(i.includes("/")&&Ee.existsSync(i))return i;try{const e=Dn.spawnSync(\"which\",[i],{encoding:\"utf8\",timeout:1e3}),r=e.stdout?.trim();if(e.status===0&&r&&Ee.existsSync(r))return r}catch(e){li().debug(\"Failed to locate command in PATH\",{safe:{},sensitive:{command:i,error:e}})}}return null}`;
 
-if (source.includes(oldSp)) {
-  source = source.replace(oldSp, newSp);
-}
-if (source.includes(oldSpNoMacGuard)) {
-  source = source.replace(oldSpNoMacGuard, newSp);
-}
+applyReplacement("legacy-sp", oldSp, newSp);
+applyReplacement("legacy-sp-no-macos-guard", oldSpNoMacGuard, newSp);
 
 const vscodeDetect = 'detect:()=>Sp("code")||Sp("codium")||sn(["/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code","/Applications/Code.app/Contents/Resources/app/bin/code"])';
 const vscodeDetectFromBundle = 'detect:()=>sn(["/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code","/Applications/Code.app/Contents/Resources/app/bin/code"])';
 const vscodeInsiderDetect = 'detect:()=>Sp("code-insiders")||Sp("codium-insiders")||sn(["/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code","/Applications/Code - Insiders.app/Contents/Resources/app/bin/code"])';
 const vscodeInsiderDetectFromBundle = 'detect:()=>sn(["/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code","/Applications/Code - Insiders.app/Contents/Resources/app/bin/code"])';
 const vscodeReplacement = `detect:()=>{const i=process.env.CODEX_VSCODE_PATH?.trim();if(i&&Ee.existsSync(i))return i;const t=Sp("code")||Sp("codium");if(t)return t;return sn(["/var/lib/flatpak/exports/bin/com.visualstudio.code","/var/lib/flatpak/exports/bin/com.vscodium.codium","${process.env.HOME ?? ""}/.local/share/flatpak/exports/bin/com.visualstudio.code","${process.env.HOME ?? ""}/.local/share/flatpak/exports/bin/com.vscodium.codium","${process.env.HOME ?? ""}/.local/bin/code","${process.env.HOME ?? ""}/.local/bin/codium","/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code","/Applications/Code.app/Contents/Resources/app/bin/code"])}`;
-const vscodeInsiderReplacement = `detect:()=>{const i=process.env.CODEX_VSCODE_INSIDERS_PATH?.trim();if(i&&Ee.existsSync(i))return i;return Sp("code-insiders")||Sp("codium-insiders")||sn(["/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code","/Applications/Code - Insiders.app/Contents/Resources/app/bin/code"])}`;
+const vscodeInsiderReplacement = `detect:()=>{const i=process.env.CODEX_VSCODE_INSIDERS_PATH?.trim();if(i&&Ee.existsSync(i))return i;const t=Sp("code-insiders")||Sp("codium-insiders");if(t)return t;return sn(["/usr/bin/code-insiders","/usr/local/bin/code-insiders","/snap/bin/code-insiders","${process.env.HOME ?? ""}/.local/bin/code-insiders","/var/lib/flatpak/exports/bin/com.visualstudio.code-insiders","${process.env.HOME ?? ""}/.local/share/flatpak/exports/bin/com.visualstudio.code-insiders","/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code","/Applications/Code - Insiders.app/Contents/Resources/app/bin/code"])}`;
 
-if (source.includes(vscodeDetect)) {
-  source = source.replace(vscodeDetect, vscodeReplacement);
+applyReplacement("legacy-vscode-detect", vscodeDetect, vscodeReplacement);
+applyReplacement("legacy-vscode-detect-bundle", vscodeDetectFromBundle, vscodeReplacement);
+applyReplacement("legacy-vscode-insiders-detect", vscodeInsiderDetect, vscodeInsiderReplacement);
+applyReplacement("legacy-vscode-insiders-detect-bundle", vscodeInsiderDetectFromBundle, vscodeInsiderReplacement);
+
+const qcOld = 'function Qc({id:t,label:e,icon:n,darwinDetect:r,win32Detect:i,darwinEnv:o,darwinArgs:s}){return{id:t,platforms:{darwin:r?{label:e,icon:n,kind:"editor",detect:r,env:o,args:s??N_}:void 0,win32:i?{label:e,icon:n,kind:"editor",detect:i,args:N_}:void 0}}}';
+const qcNew = 'function Qc({id:t,label:e,icon:n,darwinDetect:r,win32Detect:i,linuxDetect:a,darwinEnv:o,darwinArgs:s,linuxEnv:c,linuxArgs:u,linuxOpen:l}){return{id:t,platforms:{darwin:r?{label:e,icon:n,kind:"editor",detect:r,env:o,args:s??N_}:void 0,win32:i?{label:e,icon:n,kind:"editor",detect:i,args:N_}:void 0,linux:a?{label:e,icon:n,kind:"editor",detect:a,env:c,args:u??N_,open:l}:void 0}}}';
+applyReplacement("new-qc-linux-support", qcOld, qcNew);
+
+const gleOld = 'const Gle=Qc({id:"vscode",label:"VS Code",icon:"apps/vscode.png",darwinDetect:()=>rn(["/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code","/Applications/Code.app/Contents/Resources/app/bin/code"]),win32Detect:qle});function qle(){return n2({pathCommand:zr("code"),executableName:"Code.exe",installDirName:"Microsoft VS Code"})}';
+const gleNew = 'const Gle=Qc({id:"vscode",label:"VS Code",icon:"apps/vscode.png",darwinDetect:()=>rn(["/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code","/Applications/Code.app/Contents/Resources/app/bin/code"]),win32Detect:qle,linuxDetect:__codexVSCodeLinuxDetect,linuxArgs:__codexVSCodeLinuxArgs,linuxOpen:__codexVSCodeLinuxOpen});function qle(){return n2({pathCommand:zr("code"),executableName:"Code.exe",installDirName:"Microsoft VS Code"})}function __codexVSCodeLinuxDetect(){const t=process.env.CODEX_VSCODE_PATH?.trim();if(t&&H.existsSync(t))return t;const e=["/usr/bin/code","/usr/local/bin/code","/usr/share/code/bin/code","/opt/visual-studio-code/bin/code","/usr/bin/codium","/usr/local/bin/codium","/usr/share/codium/bin/codium","/opt/visual-studio-codium/bin/codium","/snap/bin/code","/snap/bin/codium",`${process.env.HOME??""}/.local/bin/code`,`${process.env.HOME??""}/.local/bin/codium`,`${process.env.HOME??""}/.local/share/flatpak/exports/bin/com.visualstudio.code`,`${process.env.HOME??""}/.local/share/flatpak/exports/bin/com.vscodium.codium`,`/var/lib/flatpak/exports/bin/com.visualstudio.code`,`/var/lib/flatpak/exports/bin/com.vscodium.codium`].filter(Boolean);for(const n of e)if(H.existsSync(n))return n;return zr("code")||zr("codium")||null}function __codexVSCodeLinuxArgs(t,e){return e?["--goto",`${t}:${e.line}:${e.column}`]:[t]}async function __codexVSCodeLinuxOpen({command:t,path:e,location:n}){const r=__codexVSCodeLinuxArgs(e,n);try{await pr(t,r)}catch{await pr(t,[e])}}';
+applyReplacement("new-vscode-linux-detect", gleOld, gleNew);
+
+const hleOld = 'const Hle=Qc({id:"vscodeInsiders",label:"VS Code Insiders",icon:"apps/vscode-insiders.png",darwinDetect:()=>rn(["/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code","/Applications/Code - Insiders.app/Contents/Resources/app/bin/code"]),win32Detect:Wle});function Wle(){return n2({pathCommand:zr("code-insiders"),executableName:"Code - Insiders.exe",installDirName:"Microsoft VS Code Insiders"})}';
+const hleNew = 'const Hle=Qc({id:"vscodeInsiders",label:"VS Code Insiders",icon:"apps/vscode-insiders.png",darwinDetect:()=>rn(["/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code","/Applications/Code - Insiders.app/Contents/Resources/app/bin/code"]),win32Detect:Wle,linuxDetect:__codexVSCodeInsidersLinuxDetect,linuxArgs:__codexVSCodeLinuxArgs,linuxOpen:__codexVSCodeLinuxOpen});function Wle(){return n2({pathCommand:zr("code-insiders"),executableName:"Code - Insiders.exe",installDirName:"Microsoft VS Code Insiders"})}function __codexVSCodeInsidersLinuxDetect(){const t=process.env.CODEX_VSCODE_INSIDERS_PATH?.trim();if(t&&H.existsSync(t))return t;const e=["/usr/bin/code-insiders","/usr/local/bin/code-insiders","/snap/bin/code-insiders",`${process.env.HOME??""}/.local/bin/code-insiders`,`${process.env.HOME??""}/.local/share/flatpak/exports/bin/com.visualstudio.code-insiders`,`/var/lib/flatpak/exports/bin/com.visualstudio.code-insiders`].filter(Boolean);for(const n of e)if(H.existsSync(n))return n;return zr("code-insiders")||zr("codium-insiders")||null}';
+applyReplacement("new-vscode-insiders-linux-detect", hleOld, hleNew);
+
+const cuOld = 'function cu({id:t,label:e,icon:n,darwinDetect:r,win32Detect:i,darwinEnv:o,darwinArgs:s}){return{id:t,platforms:{darwin:r?{label:e,icon:n,kind:"editor",detect:r,env:o,args:s??Lv}:void 0,win32:i?{label:e,icon:n,kind:"editor",detect:i,args:Lv}:void 0}}}';
+const cuNew = 'function cu({id:t,label:e,icon:n,darwinDetect:r,win32Detect:i,linuxDetect:a,darwinEnv:o,darwinArgs:s,linuxEnv:c,linuxArgs:u,linuxOpen:l}){return{id:t,platforms:{darwin:r?{label:e,icon:n,kind:"editor",detect:r,env:o,args:s??Lv}:void 0,win32:i?{label:e,icon:n,kind:"editor",detect:i,args:Lv}:void 0,linux:a?{label:e,icon:n,kind:"editor",detect:a,env:c,args:u??Lv,open:l}:void 0}}}';
+applyReplacement("new-cu-linux-support", cuOld, cuNew);
+
+const xmeOld = 'const Xme=cu({id:"vscode",label:"VS Code",icon:"apps/vscode.png",darwinDetect:()=>an(["/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code","/Applications/Code.app/Contents/Resources/app/bin/code"]),win32Detect:Jme});function Jme(){return OV({pathCommand:Wr("code"),executableName:"Code.exe",installDirName:"Microsoft VS Code"})}';
+const xmeNew = 'const Xme=cu({id:"vscode",label:"VS Code",icon:"apps/vscode.png",darwinDetect:()=>an(["/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code","/Applications/Code.app/Contents/Resources/app/bin/code"]),win32Detect:Jme,linuxDetect:__codexVSCodeLinuxDetect,linuxArgs:__codexVSCodeLinuxArgs,linuxOpen:__codexVSCodeLinuxOpen});function Jme(){return OV({pathCommand:Wr("code"),executableName:"Code.exe",installDirName:"Microsoft VS Code"})}function __codexVSCodeLinuxDetect(){const t=process.env.CODEX_VSCODE_PATH?.trim();if(t&&Je.existsSync(t))return t;const e=["/usr/bin/code","/usr/local/bin/code","/usr/share/code/bin/code","/opt/visual-studio-code/bin/code","/usr/bin/codium","/usr/local/bin/codium","/usr/share/codium/bin/codium","/opt/visual-studio-codium/bin/codium","/snap/bin/code","/snap/bin/codium",`${process.env.HOME??""}/.local/bin/code`,`${process.env.HOME??""}/.local/bin/codium`,`${process.env.HOME??""}/.local/share/flatpak/exports/bin/com.visualstudio.code`,`${process.env.HOME??""}/.local/share/flatpak/exports/bin/com.vscodium.codium`,`/var/lib/flatpak/exports/bin/com.visualstudio.code`,`/var/lib/flatpak/exports/bin/com.vscodium.codium`].filter(Boolean);for(const n of e)if(Je.existsSync(n))return n;return Wr("code")||Wr("codium")||null}function __codexVSCodeLinuxArgs(t,e){return e?["--goto",`${t}:${e.line}:${e.column}`]:[t]}async function __codexVSCodeLinuxOpen({command:t,path:e,location:n}){const r=__codexVSCodeLinuxArgs(e,n);try{await dr(t,r)}catch{await dr(t,[e])}}';
+applyReplacement("new-vscode-linux-detect-alt", xmeOld, xmeNew);
+
+const qmeOld = 'const Qme=cu({id:"vscodeInsiders",label:"VS Code Insiders",icon:"apps/vscode-insiders.png",darwinDetect:()=>an(["/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code","/Applications/Code - Insiders.app/Contents/Resources/app/bin/code"]),win32Detect:ehe});function ehe(){return OV({pathCommand:Wr("code-insiders"),executableName:"Code - Insiders.exe",installDirName:"Microsoft VS Code Insiders"})}';
+const qmeNew = 'const Qme=cu({id:"vscodeInsiders",label:"VS Code Insiders",icon:"apps/vscode-insiders.png",darwinDetect:()=>an(["/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code","/Applications/Code - Insiders.app/Contents/Resources/app/bin/code"]),win32Detect:ehe,linuxDetect:__codexVSCodeInsidersLinuxDetect,linuxArgs:__codexVSCodeLinuxArgs,linuxOpen:__codexVSCodeLinuxOpen});function ehe(){return OV({pathCommand:Wr("code-insiders"),executableName:"Code - Insiders.exe",installDirName:"Microsoft VS Code Insiders"})}function __codexVSCodeInsidersLinuxDetect(){const t=process.env.CODEX_VSCODE_INSIDERS_PATH?.trim();if(t&&Je.existsSync(t))return t;const e=["/usr/bin/code-insiders","/usr/local/bin/code-insiders","/snap/bin/code-insiders",`${process.env.HOME??""}/.local/bin/code-insiders`,`${process.env.HOME??""}/.local/share/flatpak/exports/bin/com.visualstudio.code-insiders`,`/var/lib/flatpak/exports/bin/com.visualstudio.code-insiders`].filter(Boolean);for(const n of e)if(Je.existsSync(n))return n;return Wr("code-insiders")||Wr("codium-insiders")||null}';
+applyReplacement("new-vscode-insiders-linux-detect-alt", qmeOld, qmeNew);
+
+const lpeOld = 'async function lpe(t,e,n){const r=eu.find(o=>o.id===t);if(!r)throw new Error(`Unknown open target "${t}"`);const i=r.detect();if(!i)throw new Error(`Open target "${t}" is not available`);if(r.open){await r.open({command:i,path:e,location:n});return}await pr(i,r.args(e,n),{env:r.env?.()})}';
+const lpePatched = 'async function lpe(t,e,n){const r=eu.find(o=>o.id===t);if(!r)throw new Error(`Unknown open target "${t}"`);const i=r.detect();if(!i)throw new Error(`Open target "${t}" is not available`);if(t==="vscodeInsiders"&&process.platform==="linux"){const a=r.args(e,n),c=[process.env.CODEX_VSCODE_INSIDERS_PATH,i,"/usr/bin/code-insiders","code-insiders"].filter(Boolean);for(const u of c)try{await pr(u,a,{env:r.env?.()});return}catch{}throw new Error("Open target \\"vscodeInsiders\\" is not available")}if(r.open){await r.open({command:i,path:e,location:n});return}await pr(i,r.args(e,n),{env:r.env?.()})}';
+const lpeNew = 'async function lpe(t,e,n){const r=eu.find(o=>o.id===t);if(!r)throw new Error(`Unknown open target "${t}"`);if(t==="vscodeInsiders"&&process.platform==="linux"){const i=r.args(e,n),a=[process.env.CODEX_VSCODE_INSIDERS_PATH,r.detect(),"/usr/bin/code-insiders","/usr/local/bin/code-insiders","/snap/bin/code-insiders",`${process.env.HOME??""}/.local/bin/code-insiders`,`/var/lib/flatpak/exports/bin/com.visualstudio.code-insiders`,`${process.env.HOME??""}/.local/share/flatpak/exports/bin/com.visualstudio.code-insiders`,"code-insiders","codium-insiders"].filter(Boolean);for(const c of a)try{await pr(c,i,{env:r.env?.()});return}catch{try{await pr(c,[e],{env:r.env?.()});return}catch{}}throw new Error("Open target \\"vscodeInsiders\\" is not available")}const i=r.detect();if(!i)throw new Error(`Open target "${t}" is not available`);if(r.open){await r.open({command:i,path:e,location:n});return}await pr(i,r.args(e,n),{env:r.env?.()})}';
+applyReplacement("new-lpe-vscode-insiders-open", lpeOld, lpeNew);
+applyReplacement("new-lpe-vscode-insiders-open-repatch", lpePatched, lpeNew);
+
+const _heOld = 'async function _he(t,e,n){const r=uu.find(o=>o.id===t);if(!r)throw new Error(`Unknown open target "${t}"`);const i=r.detect();if(!i)throw new Error(`Open target "${t}" is not available`);if(r.open){await r.open({command:i,path:e,location:n});return}await dr(i,r.args(e,n),{env:r.env?.()})}';
+const _heNew = 'async function _he(t,e,n){const r=uu.find(o=>o.id===t);if(!r)throw new Error(`Unknown open target "${t}"`);if(t==="vscodeInsiders"&&process.platform==="linux"){const i=r.args(e,n),a=[process.env.CODEX_VSCODE_INSIDERS_PATH,r.detect(),"/usr/bin/code-insiders","/usr/local/bin/code-insiders","/snap/bin/code-insiders",`${process.env.HOME??""}/.local/bin/code-insiders`,`/var/lib/flatpak/exports/bin/com.visualstudio.code-insiders`,`${process.env.HOME??""}/.local/share/flatpak/exports/bin/com.visualstudio.code-insiders`,"code-insiders","codium-insiders"].filter(Boolean);for(const c of a)try{await dr(c,i,{env:r.env?.()});return}catch{try{await dr(c,[e],{env:r.env?.()});return}catch{}}throw new Error("Open target \\"vscodeInsiders\\" is not available")}const i=r.detect();if(!i)throw new Error(`Open target "${t}" is not available`);if(r.open){await r.open({command:i,path:e,location:n});return}await dr(i,r.args(e,n),{env:r.env?.()})}';
+applyReplacement("new-open-target-vscode-insiders-alt", _heOld, _heNew);
+
+const vfeOld = 'async function vfe(t,e,n){if(!Yr)throw new Error("Opening external editors is only supported on macOS");const r=bp.find(a=>a.id===t);if(!r)throw new Error(`Unknown open target "${t}"`);const i=r.detect();if(!i)throw new Error(`Open target "${t}" is not available`);if(!(sfe(t)&&await hfe(t,e))){if(t==="xcode"){await afe(e,n);return}if(t==="zed"){await Sfe(i,e,n);return}await ai(i,r.args(e,n),{env:r.env?.()})}}';
+const vfePatched = 'async function vfe(t,e,n){if(process.platform==="win32")throw new Error("Opening external editors is not supported on Windows yet");const r=bp.find(a=>a.id===t);if(!r)throw new Error(`Unknown open target "${t}"`);const i=r.detect();if(!i)throw new Error(`Open target "${t}" is not available`);if(!(sfe(t)&&await hfe(t,e))){if(t==="vscodeInsiders"){const a=r.args(e,n),o=[process.env.CODEX_VSCODE_INSIDERS_PATH,i,"/usr/bin/code-insiders","code-insiders"].filter(Boolean);for(const s of o)try{await ai(s,a,{env:r.env?.()});return}catch{}throw new Error("Open target \\"vscodeInsiders\\" is not available")}if(t==="xcode"){await afe(e,n);return}if(t==="zed"){await Sfe(i,e,n);return}await ai(i,r.args(e,n),{env:r.env?.()})}}';
+const vfeNew = 'async function vfe(t,e,n){if(process.platform==="win32")throw new Error("Opening external editors is not supported on Windows yet");const r=bp.find(a=>a.id===t);if(!r)throw new Error(`Unknown open target "${t}"`);if(t==="vscodeInsiders"){const i=r.args(e,n),a=[process.env.CODEX_VSCODE_INSIDERS_PATH,r.detect(),"/usr/bin/code-insiders","/usr/local/bin/code-insiders","/snap/bin/code-insiders",`${process.env.HOME??""}/.local/bin/code-insiders`,`/var/lib/flatpak/exports/bin/com.visualstudio.code-insiders`,`${process.env.HOME??""}/.local/share/flatpak/exports/bin/com.visualstudio.code-insiders`,"code-insiders","codium-insiders"].filter(Boolean);for(const o of a)try{await ai(o,i,{env:r.env?.()});return}catch{try{await ai(o,[e],{env:r.env?.()});return}catch{}}throw new Error("Open target \\"vscodeInsiders\\" is not available")}const i=r.detect();if(!i)throw new Error(`Open target "${t}" is not available`);if(!(sfe(t)&&await hfe(t,e))){if(t==="xcode"){await afe(e,n);return}if(t==="zed"){await Sfe(i,e,n);return}await ai(i,r.args(e,n),{env:r.env?.()})}}';
+applyReplacement("legacy-vfe-vscode-insiders-open", vfeOld, vfeNew);
+applyReplacement("legacy-vfe-vscode-insiders-open-repatch", vfePatched, vfeNew);
+
+const modernEditorFactoryRe = /function ([A-Za-z_$][\w$]*)\(\{id:([A-Za-z_$][\w$]*),label:([A-Za-z_$][\w$]*),icon:([A-Za-z_$][\w$]*),darwinDetect:([A-Za-z_$][\w$]*),win32Detect:([A-Za-z_$][\w$]*),darwinEnv:([A-Za-z_$][\w$]*),darwinArgs:([A-Za-z_$][\w$]*)\}\)\{return\{id:\2,platforms:\{darwin:\5\?\{label:\3,icon:\4,kind:"editor",detect:\5,env:\7,args:\8\?\?([A-Za-z_$][\w$]*)\}:void 0,win32:\6\?\{label:\3,icon:\4,kind:"editor",detect:\6,args:\9\}:void 0\}\}\}/;
+applyRegexReplacement(
+  "modern-editor-factory-linux-support",
+  modernEditorFactoryRe,
+  (_, fnName, idVar, labelVar, iconVar, darwinVar, win32Var, darwinEnvVar, darwinArgsVar, defaultArgsVar) =>
+    `function ${fnName}({id:${idVar},label:${labelVar},icon:${iconVar},darwinDetect:${darwinVar},win32Detect:${win32Var},linuxDetect:a,darwinEnv:${darwinEnvVar},darwinArgs:${darwinArgsVar},linuxEnv:c,linuxArgs:u,linuxOpen:l}){return{id:${idVar},platforms:{darwin:${darwinVar}?{label:${labelVar},icon:${iconVar},kind:"editor",detect:${darwinVar},env:${darwinEnvVar},args:${darwinArgsVar}??${defaultArgsVar}}:void 0,win32:${win32Var}?{label:${labelVar},icon:${iconVar},kind:"editor",detect:${win32Var},args:${defaultArgsVar}}:void 0,linux:a?{label:${labelVar},icon:${iconVar},kind:"editor",detect:a,env:c,args:u??${defaultArgsVar},open:l}:void 0}}}`
+);
+
+const modernVSCodeTargetRe = /const ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\{id:"vscode",label:"VS Code",icon:"apps\/vscode\.png",([^}]*)\}\);/;
+applyRegexReplacement(
+  "modern-vscode-linux-target",
+  modernVSCodeTargetRe,
+  (full, constVar, factoryVar, props) => {
+    if (props.includes("linuxDetect:")) return full;
+    const cleanProps = props.endsWith(",") ? props.slice(0, -1) : props;
+    return `const ${constVar}=${factoryVar}({id:"vscode",label:"VS Code",icon:"apps/vscode.png",${cleanProps},linuxDetect:__codexVSCodeLinuxDetect,linuxArgs:__codexVSCodeLinuxArgs,linuxOpen:__codexVSCodeLinuxOpen});`;
+  }
+);
+
+const modernVSCodeInsidersTargetRe = /const ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\{id:"vscodeInsiders",label:"VS Code Insiders",icon:"apps\/vscode-insiders\.png",([^}]*)\}\);/;
+applyRegexReplacement(
+  "modern-vscode-insiders-linux-target",
+  modernVSCodeInsidersTargetRe,
+  (full, constVar, factoryVar, props) => {
+    if (props.includes("linuxDetect:")) return full;
+    const cleanProps = props.endsWith(",") ? props.slice(0, -1) : props;
+    return `const ${constVar}=${factoryVar}({id:"vscodeInsiders",label:"VS Code Insiders",icon:"apps/vscode-insiders.png",${cleanProps},linuxDetect:__codexVSCodeInsidersLinuxDetect,linuxArgs:__codexVSCodeLinuxArgs,linuxOpen:__codexVSCodeLinuxOpen});`;
+  }
+);
+
+const modernFileManagerTargetRe = /const ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\{id:"fileManager",label:"Finder",icon:"apps\/finder\.png",kind:"fileManager",darwin:\{detect:\(\)=>"open",args:t=>([A-Za-z_$][\w$]*)\(t\)\},win32:\{label:"Explorer",icon:"apps\/file-explorer\.png",detect:([A-Za-z_$][\w$]*),args:t=>[A-Za-z_$][\w$]*\(t\),open:async\(\{path:t\}\)=>([A-Za-z_$][\w$]*)\(t\)\}\}\);/;
+applyRegexReplacement(
+  "modern-file-manager-linux-target",
+  modernFileManagerTargetRe,
+  (_, constVar, factoryVar, argsFn, winDetectFn, winOpenFn) =>
+    `const ${constVar}=${factoryVar}({id:"fileManager",label:"Finder",icon:"apps/finder.png",kind:"fileManager",darwin:{detect:()=>"open",args:t=>${argsFn}(t)},win32:{label:"Explorer",icon:"apps/file-explorer.png",detect:${winDetectFn},args:t=>${argsFn}(t),open:async({path:t})=>${winOpenFn}(t)},linux:{label:"File Manager",icon:"apps/file-explorer.png",detect:__codexFileManagerLinuxDetect,args:t=>__codexFileManagerLinuxArgs(t)}});`
+);
+
+if (!source.includes("function __codexVSCodeLinuxDetect()")) {
+  const modernHelperInsertRe = /function ([A-Za-z_$][\w$]*)\(\)\{return ([A-Za-z_$][\w$]*)\(\{pathCommand:([A-Za-z_$][\w$]*)\("code-insiders"\),executableName:"Code - Insiders\.exe",installDirName:"Microsoft VS Code Insiders"\}\)\}/;
+  applyRegexReplacement(
+    "modern-vscode-linux-helper-inject",
+    modernHelperInsertRe,
+    (full, insidersWinFn, winResolveFn, whichFn) =>
+      `${full}function __codexVSCodeLinuxDetect(){const t=process.env.CODEX_VSCODE_PATH?.trim();if(t)return t;return ${whichFn}("code")||${whichFn}("codium")||null}function __codexVSCodeInsidersLinuxDetect(){const t=process.env.CODEX_VSCODE_INSIDERS_PATH?.trim();if(t)return t;return ${whichFn}("code-insiders")||${whichFn}("codium-insiders")||null}function __codexVSCodeLinuxArgs(t,e){return e?["--goto",\`${"${t}:${e.line}:${e.column}"}\`]:[t]}async function __codexVSCodeLinuxOpen({command:t,path:e,location:n}){const r=__codexVSCodeLinuxArgs(e,n);try{await gr(t,r)}catch{await gr(t,[e])}}`
+  );
 }
-if (source.includes(vscodeDetectFromBundle)) {
-  source = source.replace(vscodeDetectFromBundle, vscodeReplacement);
-}
-if (source.includes(vscodeInsiderDetect)) {
-  source = source.replace(vscodeInsiderDetect, vscodeInsiderReplacement);
-}
-if (source.includes(vscodeInsiderDetectFromBundle)) {
-  source = source.replace(vscodeInsiderDetectFromBundle, vscodeInsiderReplacement);
+
+if (!source.includes("function __codexFileManagerLinuxDetect()")) {
+  const fileManagerHelperInsertRe = /function ([A-Za-z_$][\w$]*)\(t\)\{let e=t;for\(;;\)\{if\(([A-Za-z_$][\w$]*)\.existsSync\(e\)\)return e;const n=([A-Za-z_$][\w$]*)\.dirname\(e\);if\(n===e\)return null;e=n\}\}/;
+  applyRegexReplacement(
+    "modern-file-manager-linux-helper-inject",
+    fileManagerHelperInsertRe,
+    (full, nearestExistingFn, fsVar, pathVar) =>
+      `${full}function __codexFileManagerLinuxDetect(){return process.platform==="linux"?"xdg-open":null}function __codexFileManagerLinuxArgs(t){const e=${nearestExistingFn}(t)??t;try{return [${fsVar}.existsSync(e)&&${fsVar}.statSync(e).isDirectory()?e:${pathVar}.dirname(e)]}catch{return [${pathVar}.dirname(e)]}}`
+  );
 }
 
 if (source !== original) {
+  vm.createScript(source, { filename: path });
   fs.writeFileSync(path, source);
+  console.log(`[codex-linux] Linux editor patch applied (${path}): ${applied.join(", ")}`);
+} else {
+  console.log(`[codex-linux] Linux editor patch skipped (${path}): no matching patterns found.`);
 }
 NODE
+  done
 }
 
 patch_background_terminal_stop() {
@@ -688,6 +798,344 @@ if (source !== original) {
 NODE
 }
 
+patch_plan_mode_indicator() {
+  local webview_index web_bundle_rel web_bundle
+
+  webview_index="$APP_ASAR_DIR/webview/index.html"
+  web_bundle_rel=""
+  web_bundle=""
+
+  if [ -f "$webview_index" ]; then
+    web_bundle_rel="$(grep -oE 'assets/index-[^"]+\.js' "$webview_index" | head -n 1 || true)"
+  fi
+
+  if [ -n "$web_bundle_rel" ] && [ -f "$APP_ASAR_DIR/webview/$web_bundle_rel" ]; then
+    web_bundle="$APP_ASAR_DIR/webview/$web_bundle_rel"
+  else
+    web_bundle="$(find "$APP_ASAR_DIR/webview/assets" -maxdepth 1 -name 'index-*.js' -type f -print | head -n 1 || true)"
+  fi
+
+  if [ -z "$web_bundle" ]; then
+    warn "No webview index-*.js bundle found; skipping Plan mode indicator patch"
+    return
+  fi
+
+  node - <<'NODE' "$web_bundle"
+const fs = require("node:fs");
+
+const bundlePath = process.argv[2];
+if (!bundlePath) process.exit(0);
+
+let source = fs.readFileSync(bundlePath, "utf8");
+const original = source;
+
+function findMatchingBrace(text, openBraceIndex) {
+  let depth = 0;
+  let inSingle = false;
+  let inDouble = false;
+  let inTemplate = false;
+  let escape = false;
+  for (let i = openBraceIndex; i < text.length; i += 1) {
+    const ch = text[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escape = true;
+      continue;
+    }
+    if (inSingle) {
+      if (ch === "'") inSingle = false;
+      continue;
+    }
+    if (inDouble) {
+      if (ch === '"') inDouble = false;
+      continue;
+    }
+    if (inTemplate) {
+      if (ch === "`") inTemplate = false;
+      continue;
+    }
+    if (ch === "'") {
+      inSingle = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDouble = true;
+      continue;
+    }
+    if (ch === "`") {
+      inTemplate = true;
+      continue;
+    }
+    if (ch === "{") depth += 1;
+    if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+let patchedMethod = false;
+let patchedHook = false;
+
+const methodAnchor = "async setLatestCollaborationModeForConversation(";
+const methodStart = source.indexOf(methodAnchor);
+if (methodStart === -1) {
+  console.log("[codex-linux] Plan mode indicator patch skipped: method not found.");
+} else {
+  const methodOpenBrace = source.indexOf("{", methodStart);
+  if (methodOpenBrace === -1) {
+    console.log("[codex-linux] Plan mode indicator patch skipped: malformed method.");
+  } else {
+    const methodCloseBrace = findMatchingBrace(source, methodOpenBrace);
+    if (methodCloseBrace === -1) {
+      console.log("[codex-linux] Plan mode indicator patch skipped: unbalanced method.");
+    } else {
+      const methodSource = source.slice(methodStart, methodCloseBrace + 1);
+      if (
+        !methodSource.includes("try{await this.sendThreadFollowerRequest(") ||
+        !methodSource.includes("}finally{this.updateConversationState(")
+      ) {
+        const methodPattern = /^async setLatestCollaborationModeForConversation\(([^,]+),([^\)]+)\)\{const ([^=]+)=this\.getStreamRole\(\1\);await this\.sendThreadFollowerRequest\(\3,"thread-follower-set-collaboration-mode",\{conversationId:\1,collaborationMode:\2\}\)(\|\||,)this\.updateConversationState\(\1,([^=]+)=>\{\5\.latestCollaborationMode=\2\}\)\}$/;
+        const match = methodSource.match(methodPattern);
+        if (!match) {
+          console.log("[codex-linux] Plan mode indicator patch skipped: expected method pattern not found.");
+        } else {
+          const [, conversationVar, modeVar, roleVar, , stateVar] = match;
+          const patchedMethodSource = `async setLatestCollaborationModeForConversation(${conversationVar},${modeVar}){const ${roleVar}=this.getStreamRole(${conversationVar});try{await this.sendThreadFollowerRequest(${roleVar},"thread-follower-set-collaboration-mode",{conversationId:${conversationVar},collaborationMode:${modeVar}})}finally{this.updateConversationState(${conversationVar},${stateVar}=>{${stateVar}.latestCollaborationMode=${modeVar}})}}`;
+          source = source.slice(0, methodStart) + patchedMethodSource + source.slice(methodCloseBrace + 1);
+          patchedMethod = true;
+        }
+      }
+    }
+  }
+}
+
+const hookAnchor = "function n2(t=null){";
+const hookStart = source.indexOf(hookAnchor);
+if (hookStart === -1) {
+  console.log("[codex-linux] Plan mode indicator patch skipped: hook not found.");
+} else {
+  const hookOpenBrace = source.indexOf("{", hookStart);
+  if (hookOpenBrace === -1) {
+    console.log("[codex-linux] Plan mode indicator patch skipped: malformed hook.");
+  } else {
+    const hookCloseBrace = findMatchingBrace(source, hookOpenBrace);
+    if (hookCloseBrace === -1) {
+      console.log("[codex-linux] Plan mode indicator patch skipped: unbalanced hook.");
+    } else {
+      const hookSource = source.slice(hookStart, hookCloseBrace + 1);
+      const hookAlreadyPatched =
+        hookSource.includes("d=i??u?.mode??wU") &&
+        hookSource.includes("if(s(b),Nne(),t)") &&
+        hookSource.includes("return}},v=A.useEffectEvent(");
+      if (!hookAlreadyPatched) {
+        let patchedHookSource = hookSource;
+        patchedHookSource = patchedHookSource.replace("u=n,d=u?.mode??i??wU,", "u=n,d=i??u?.mode??wU,");
+        patchedHookSource = patchedHookSource.replace("p=u??f.find(b=>b.mode===d)??l,", "p=f.find(b=>b.mode===d)??u??l,");
+        patchedHookSource = patchedHookSource.replace("g=b=>{if(Nne(),t){", "g=b=>{if(s(b),Nne(),t){");
+        patchedHookSource = patchedHookSource.replace("})}return}s(b)},v=A.useEffectEvent(", "})}return}},v=A.useEffectEvent(");
+
+        if (patchedHookSource === hookSource) {
+          console.log("[codex-linux] Plan mode indicator patch skipped: expected hook pattern not found.");
+        } else {
+          source = source.slice(0, hookStart) + patchedHookSource + source.slice(hookCloseBrace + 1);
+          patchedHook = true;
+        }
+      }
+    }
+  }
+}
+
+if (source !== original) {
+  fs.writeFileSync(bundlePath, source);
+  const updates = [];
+  if (patchedMethod) updates.push("method");
+  if (patchedHook) updates.push("hook");
+  console.log(`[codex-linux] Patched Plan mode indicator refresh on toggle (${updates.join(", ")}).`);
+}
+NODE
+}
+
+patch_sidebar_active_threads() {
+  local webview_index web_bundle_rel web_bundle
+
+  webview_index="$APP_ASAR_DIR/webview/index.html"
+  web_bundle_rel=""
+  web_bundle=""
+
+  if [ -f "$webview_index" ]; then
+    web_bundle_rel="$(grep -oE 'assets/index-[^"]+\.js' "$webview_index" | head -n 1 || true)"
+  fi
+
+  if [ -n "$web_bundle_rel" ] && [ -f "$APP_ASAR_DIR/webview/$web_bundle_rel" ]; then
+    web_bundle="$APP_ASAR_DIR/webview/$web_bundle_rel"
+  else
+    web_bundle="$(find "$APP_ASAR_DIR/webview/assets" -maxdepth 1 -name 'index-*.js' -type f -print | head -n 1 || true)"
+  fi
+
+  if [ -z "$web_bundle" ]; then
+    warn "No webview index-*.js bundle found; skipping Active threads sidebar patch"
+    return
+  fi
+
+  node - <<'NODE' "$web_bundle"
+const fs = require("node:fs");
+
+const bundlePath = process.argv[2];
+if (!bundlePath) process.exit(0);
+
+let source = fs.readFileSync(bundlePath, "utf8");
+const original = source;
+const applied = [];
+
+function applyExact(name, from, to, required = true) {
+  if (source.includes(to)) return true;
+  if (!source.includes(from)) {
+    if (required) console.log(`[codex-linux] Active threads sidebar patch: missing pattern (${name}).`);
+    return !required;
+  }
+  source = source.replace(from, () => to);
+  applied.push(name);
+  return true;
+}
+
+const alreadyPatched =
+  source.includes('sidebarElectron.activeThreads') &&
+  source.includes("codexActiveSidebarItems=") &&
+  !source.includes("toggle_active_threads") &&
+  !source.includes("codexActiveSidebarItems.length>0?") &&
+  source.includes("title:mn,children:f.jsx(DOe,{items:codexActiveSidebarItems");
+if (alreadyPatched) process.exit(0);
+
+let ok = true;
+
+ok =
+  applyExact(
+    "cleanup-setting-key",
+    'Os("sidebar-view-v2","threads"),__codexSidebarActiveFilterKey=Os("sidebar-active-thread-filter-v1","all");function $$t(){',
+    'Os("sidebar-view-v2","threads");function $$t(){',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "cleanup-state",
+    'const{groups:Me,isWorkspaceRootOptionsLoading:Oe,workspaceRootOptions:Ue,workspaceRootLabels:He}=YUt(Ie,Re),[Ze,Xe]=cr(H$t),[codexActiveFilter,codexSetActiveFilter]=cr(__codexSidebarActiveFilterKey),codexShowActiveOnly=codexActiveFilter==="active";',
+    'const{groups:Me,isWorkspaceRootOptionsLoading:Oe,workspaceRootOptions:Ue,workspaceRootLabels:He}=YUt(Ie,Re),[Ze,Xe]=cr(H$t);',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "cleanup-visible-groups",
+    'const gt=ft.length,yt=!Oe,dt=be.length>0,codexVisibleGroups=codexShowActiveOnly?Me.map(mn=>({...mn,tasks:mn.tasks.filter(_n=>__codexSidebarIsActiveThread(_n)||j3(_n)===x)})).filter(mn=>mn.tasks.length>0):Me,at=!Pe&&codexVisibleGroups.length===0&&_e.length===0&&!dt;',
+    'const gt=ft.length,yt=!Oe,dt=be.length>0,at=!Pe&&Me.length===0&&_e.length===0&&!dt;',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "cleanup-visible-items",
+    'const vt=ys(Dt),Bt=Ph(),Zt=iWt({items:xe,itemsForVisibilityLookup:[...be,...xe],showRecent:Pe,hasGitRpc:Bt,workspaceTaskFilter:F,currentConversationId:S,isBackgroundSubagentsEnabled:ee}).filter(K$t),codexActiveItems=Zt.filter(mn=>__codexSidebarIsActiveThread(mn.task)||j3(mn.task)===x),codexVisibleItems=codexShowActiveOnly?codexActiveItems:Zt;',
+    'const vt=ys(Dt),Bt=Ph(),Zt=iWt({items:xe,itemsForVisibilityLookup:[...be,...xe],showRecent:Pe,hasGitRpc:Bt,workspaceTaskFilter:F,currentConversationId:S,isBackgroundSubagentsEnabled:ee}).filter(K$t);',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "cleanup-visible-item-usage",
+    'const Ut=Pe&&SUt({items:codexVisibleItems,currentThreadKey:x,maxItems:q5e,getTask:G$t}),en=CUt({pinnedItems:be,showRecent:Pe,recentItems:codexVisibleItems,groups:codexVisibleGroups,isBackgroundSubagentsEnabled:ee}),Wt=new Map;',
+    'const Ut=Pe&&SUt({items:Zt,currentThreadKey:x,maxItems:q5e,getTask:G$t}),en=CUt({pinnedItems:be,showRecent:Pe,recentItems:Zt,groups:Me,isBackgroundSubagentsEnabled:ee}),Wt=new Map;',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "cleanup-group-selection",
+    'if(x!=null)if(t[27]!==x||t[28]!==codexVisibleGroups){for(const mn of codexVisibleGroups)if(mn.tasks.some(_n=>j3(_n)===x)){Ft=mn.path;break}t[27]=x,t[28]=codexVisibleGroups,t[29]=Ft}else Ft=t[29];',
+    'if(x!=null)if(t[27]!==x||t[28]!==Me){for(const mn of Me)if(mn.tasks.some(_n=>j3(_n)===x)){Ft=mn.path;break}t[27]=x,t[28]=Me,t[29]=Ft}else Ft=t[29];',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "cleanup-toggle-button",
+    'f.jsx(I$t,{groupByWorkspace:!Pe,onGroupByWorkspaceChange:mn=>{o({eventName:"codex_app_nav_clicked",metadata:{item:"toggle_recent"}}),De(mn?"threads":"recent")}}),f.jsx(Ge,{className:"h-6 rounded-md px-2 text-xs",color:codexShowActiveOnly?"secondary":"ghostActive",size:"default",onClick:()=>{o({eventName:"codex_app_nav_clicked",metadata:{item:"toggle_active_threads"}}),codexSetActiveFilter(codexShowActiveOnly?"all":"active")},children:f.jsx(q,{id:"sidebarElectron.activeOnlyToggle",defaultMessage:"Active",description:"Toggle button label to show only active threads in sidebar"})})]})',
+    'f.jsx(I$t,{groupByWorkspace:!Pe,onGroupByWorkspaceChange:mn=>{o({eventName:"codex_app_nav_clicked",metadata:{item:"toggle_recent"}}),De(mn?"threads":"recent")}})]})',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "cleanup-recent-render",
+    'children:mn=>f.jsx(DOe,{items:codexVisibleItems,ariaLabel:mn.map(W$t).join(""),',
+    'children:mn=>f.jsx(DOe,{items:Zt,ariaLabel:mn.map(W$t).join(""),',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "cleanup-grouped-render",
+    'groups:codexVisibleGroups,unpinnedItemByTaskKey:ge,',
+    'groups:Me,unpinnedItemByTaskKey:ge,',
+    false
+  ) && ok;
+
+if (!source.includes("function __codexSidebarIsActiveThread(")) {
+  ok =
+    applyExact(
+      "ensure-active-helper",
+      'function TIt(t){if(t.kind==="remote"){const e=t.task.task_status_display?.latest_turn_status_display?.turn_status;return t.task.has_unread_turn===!0||e==="in_progress"||e==="pending"}return t.kind==="local"&&t.conversation.hasUnreadTurn?!0:t.kind==="local"?TD(t.conversation):t.kind==="pending-worktree"}function WI(t){',
+      'function TIt(t){if(t.kind==="remote"){const e=t.task.task_status_display?.latest_turn_status_display?.turn_status;return t.task.has_unread_turn===!0||e==="in_progress"||e==="pending"}return t.kind==="local"&&t.conversation.hasUnreadTurn?!0:t.kind==="local"?TD(t.conversation):t.kind==="pending-worktree"}function __codexSidebarIsActiveThread(t){if(t.kind==="remote"){const e=t.task.task_status_display?.latest_turn_status_display?.turn_status;return e==="in_progress"||e==="pending"}return t.kind==="local"?TD(t.conversation)||QEe(t.conversation):t.kind==="pending-worktree"}function WI(t){'
+    ) && ok;
+}
+
+ok =
+  applyExact(
+    "inject-active-items",
+    'const vt=ys(Dt),Bt=Ph(),Zt=iWt({items:xe,itemsForVisibilityLookup:[...be,...xe],showRecent:Pe,hasGitRpc:Bt,workspaceTaskFilter:F,currentConversationId:S,isBackgroundSubagentsEnabled:ee}).filter(K$t);',
+    'const vt=ys(Dt),Bt=Ph(),Zt=iWt({items:xe,itemsForVisibilityLookup:[...be,...xe],showRecent:Pe,hasGitRpc:Bt,workspaceTaskFilter:F,currentConversationId:S,isBackgroundSubagentsEnabled:ee}).filter(K$t),codexActiveSidebarItems=Zt.filter(mn=>__codexSidebarIsActiveThread(mn.task)||j3(mn.task)===x);'
+  ) && ok;
+
+ok =
+  applyExact(
+    "upgrade-gated-active-top-section",
+    '):null]})}),codexActiveSidebarItems.length>0?f.jsx("div",{className:"px-row-x",children:f.jsx(qL,{children:f.jsx(q,{id:"sidebarElectron.activeThreads",defaultMessage:"Active threads",description:"List label for active threads at the top of the sidebar",children:mn=>f.jsx(DOe,{items:codexActiveSidebarItems,ariaLabel:mn.map(W$t).join(""),currentThreadKey:x,onActivateThread:C,className:"pb-2",itemClassName:"after:block after:h-1 after:content-[\'\'] last:after:hidden",rowOptions:{mutePendingAutomation:!0,expandedSubagentParents:it,onToggleSubagentChildren:Je}})})})}):null,dt?f.jsx("div",{className:"px-row-x",children:f.jsx(qL,{children:f.jsx(q,{id:"sidebarElectron.pinnedThreads"',
+    '):null]})}),f.jsx("div",{className:"px-row-x",children:f.jsx(q,{id:"sidebarElectron.activeThreads",defaultMessage:"Active threads",description:"List label for active threads at the top of the sidebar",children:mn=>f.jsx(qL,{title:mn,children:f.jsx(DOe,{items:codexActiveSidebarItems,ariaLabel:mn.map(W$t).join(""),currentThreadKey:x,onActivateThread:C,className:"pb-2",itemClassName:"after:block after:h-1 after:content-[\'\'] last:after:hidden",rowOptions:{mutePendingAutomation:!0,expandedSubagentParents:it,onToggleSubagentChildren:Je}})})})}),dt?f.jsx("div",{className:"px-row-x",children:f.jsx(qL,{children:f.jsx(q,{id:"sidebarElectron.pinnedThreads"',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "upgrade-ungated-active-top-section-title",
+    '):null]})}),f.jsx("div",{className:"px-row-x",children:f.jsx(qL,{children:f.jsx(q,{id:"sidebarElectron.activeThreads",defaultMessage:"Active threads",description:"List label for active threads at the top of the sidebar",children:mn=>f.jsx(DOe,{items:codexActiveSidebarItems,ariaLabel:mn.map(W$t).join(""),currentThreadKey:x,onActivateThread:C,className:"pb-2",itemClassName:"after:block after:h-1 after:content-[\'\'] last:after:hidden",rowOptions:{mutePendingAutomation:!0,expandedSubagentParents:it,onToggleSubagentChildren:Je}})})})}),dt?f.jsx("div",{className:"px-row-x",children:f.jsx(qL,{children:f.jsx(q,{id:"sidebarElectron.pinnedThreads"',
+    '):null]})}),f.jsx("div",{className:"px-row-x",children:f.jsx(q,{id:"sidebarElectron.activeThreads",defaultMessage:"Active threads",description:"List label for active threads at the top of the sidebar",children:mn=>f.jsx(qL,{title:mn,children:f.jsx(DOe,{items:codexActiveSidebarItems,ariaLabel:mn.map(W$t).join(""),currentThreadKey:x,onActivateThread:C,className:"pb-2",itemClassName:"after:block after:h-1 after:content-[\'\'] last:after:hidden",rowOptions:{mutePendingAutomation:!0,expandedSubagentParents:it,onToggleSubagentChildren:Je}})})})}),dt?f.jsx("div",{className:"px-row-x",children:f.jsx(qL,{children:f.jsx(q,{id:"sidebarElectron.pinnedThreads"',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "inject-active-top-section",
+    '):null]})}),dt?f.jsx("div",{className:"px-row-x",children:f.jsx(qL,{children:f.jsx(q,{id:"sidebarElectron.pinnedThreads"',
+    '):null]})}),f.jsx("div",{className:"px-row-x",children:f.jsx(q,{id:"sidebarElectron.activeThreads",defaultMessage:"Active threads",description:"List label for active threads at the top of the sidebar",children:mn=>f.jsx(qL,{title:mn,children:f.jsx(DOe,{items:codexActiveSidebarItems,ariaLabel:mn.map(W$t).join(""),currentThreadKey:x,onActivateThread:C,className:"pb-2",itemClassName:"after:block after:h-1 after:content-[\'\'] last:after:hidden",rowOptions:{mutePendingAutomation:!0,expandedSubagentParents:it,onToggleSubagentChildren:Je}})})})}),dt?f.jsx("div",{className:"px-row-x",children:f.jsx(qL,{children:f.jsx(q,{id:"sidebarElectron.pinnedThreads"'
+  ) && ok;
+
+if (!ok) {
+  console.log("[codex-linux] Active threads sidebar patch skipped: required patterns not found.");
+  process.exit(0);
+}
+
+if (source !== original) {
+  fs.writeFileSync(bundlePath, source);
+  console.log(`[codex-linux] Patched sidebar active threads toggle (${applied.join(", ")}).`);
+}
+NODE
+}
+
 patch_mcp_install_auth() {
   local mcp_bundle
   mcp_bundle="$(find "$APP_ASAR_DIR/webview/assets" -maxdepth 1 -name 'mcp-settings-*.js' -type f -print | head -n 1 || true)"
@@ -730,7 +1178,7 @@ resolve_electron_version() {
   local version=""
 
   if [ -f "$APP_ASAR_DIR/package.json" ]; then
-    version="$(node -p "try { const pkg=require('$APP_ASAR_DIR/package.json'); const v=(pkg.devDependencies?.electron || pkg.dependencies?.electron || '').replace(/^\^/, ''); if (/^[0-9]+(\\.[0-9]+){1,}$/.test(v)) v : '' } catch { '' }" 2>/dev/null || true)"
+    version="$(node -p "try { const pkg=require('$APP_ASAR_DIR/package.json'); const v=(pkg.devDependencies?.electron || pkg.dependencies?.electron || '').replace(/^\^/, ''); if (/^[0-9]+(\\.[0-9]+){1,2}$/.test(v)) v : '' } catch { '' }" 2>/dev/null || true)"
     if [ -n "$version" ]; then
       echo "$version"
       return
@@ -780,13 +1228,27 @@ __TOOLS_PKG__
 ensure_local_electron() {
   local version="$1"
   local current="$(node -p "try { require('$TOOLS_DIR/node_modules/electron/package.json').version } catch (e) { '' }" 2>/dev/null || true)"
+  local target="$version"
 
-  if [ "$current" != "$version" ]; then
-    log "Installing local Electron $version"
-    pnpm --dir "$TOOLS_DIR" add -D "electron@$version"
+  if [ "$current" != "$target" ]; then
+    log "Installing local Electron $target"
+    if ! pnpm --dir "$TOOLS_DIR" add -D "electron@$target"; then
+      if [ -n "$current" ]; then
+        warn "Failed to install Electron $target; using existing local Electron $current"
+        target="$current"
+      else
+        fail "Failed to install Electron $target and no existing local Electron is available"
+      fi
+    else
+      current="$(node -p "try { require('$TOOLS_DIR/node_modules/electron/package.json').version } catch (e) { '' }" 2>/dev/null || true)"
+      if [ -n "$current" ]; then
+        target="$current"
+      fi
+    fi
   fi
 
   pnpm --dir "$TOOLS_DIR" rebuild electron || true
+  ELECTRON_RUNTIME_VERSION="$target"
 }
 
 needs_native_rebuild() {
@@ -991,9 +1453,270 @@ if [ -z "${CODEX_VSCODE_PATH:-}" ]; then
 fi
 
 if [ -z "${CODEX_VSCODE_INSIDERS_PATH:-}" ]; then
-  for candidate in "$(command -v code-insiders 2>/dev/null || true)" "$(command -v codium-insiders 2>/dev/null || true)" "/usr/bin/code-insiders" "/usr/local/bin/code-insiders" "/var/lib/flatpak/exports/bin/com.visualstudio.code-insiders" "${HOME}/.local/share/flatpak/exports/bin/com.visualstudio.code-insiders"; do
+  for candidate in "$(command -v code-insiders 2>/dev/null || true)" "$(command -v codium-insiders 2>/dev/null || true)" "/usr/bin/code-insiders" "/usr/local/bin/code-insiders" "/snap/bin/code-insiders" "${HOME}/.local/bin/code-insiders" "/var/lib/flatpak/exports/bin/com.visualstudio.code-insiders" "${HOME}/.local/share/flatpak/exports/bin/com.visualstudio.code-insiders"; do
     [ -n "$candidate" ] && [ -x "$candidate" ] && export CODEX_VSCODE_INSIDERS_PATH="$candidate" && break
   done
+fi
+
+auto_heal_open_targets() {
+  [ "${CODEX_PATCH_AUTO_HEAL:-1}" = "1" ] || return 0
+
+  local main_bundle="$APP_DIR/.vite/build/main.js"
+  [ -f "$main_bundle" ] || return 0
+
+  node - <<'NODE' "$main_bundle"
+const fs = require("node:fs");
+
+const bundlePath = process.argv[2];
+if (!bundlePath) process.exit(0);
+
+let source = fs.readFileSync(bundlePath, "utf8");
+const original = source;
+
+function applyRegex(re, replacement) {
+  const next = source.replace(re, replacement);
+  if (next === source) return false;
+  source = next;
+  return true;
+}
+
+const editorFactoryRe = /function ([A-Za-z_$][\w$]*)\(\{id:([A-Za-z_$][\w$]*),label:([A-Za-z_$][\w$]*),icon:([A-Za-z_$][\w$]*),darwinDetect:([A-Za-z_$][\w$]*),win32Detect:([A-Za-z_$][\w$]*),darwinEnv:([A-Za-z_$][\w$]*),darwinArgs:([A-Za-z_$][\w$]*)\}\)\{return\{id:\2,platforms:\{darwin:\5\?\{label:\3,icon:\4,kind:"editor",detect:\5,env:\7,args:\8\?\?([A-Za-z_$][\w$]*)\}:void 0,win32:\6\?\{label:\3,icon:\4,kind:"editor",detect:\6,args:\9\}:void 0\}\}\}/;
+applyRegex(
+  editorFactoryRe,
+  (_, fnName, idVar, labelVar, iconVar, darwinVar, win32Var, darwinEnvVar, darwinArgsVar, defaultArgsVar) =>
+    `function ${fnName}({id:${idVar},label:${labelVar},icon:${iconVar},darwinDetect:${darwinVar},win32Detect:${win32Var},linuxDetect:a,darwinEnv:${darwinEnvVar},darwinArgs:${darwinArgsVar},linuxEnv:c,linuxArgs:u,linuxOpen:l}){return{id:${idVar},platforms:{darwin:${darwinVar}?{label:${labelVar},icon:${iconVar},kind:"editor",detect:${darwinVar},env:${darwinEnvVar},args:${darwinArgsVar}??${defaultArgsVar}}:void 0,win32:${win32Var}?{label:${labelVar},icon:${iconVar},kind:"editor",detect:${win32Var},args:${defaultArgsVar}}:void 0,linux:a?{label:${labelVar},icon:${iconVar},kind:"editor",detect:a,env:c,args:u??${defaultArgsVar},open:l}:void 0}}}`
+);
+
+const vscodeRe = /const ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\{id:"vscode",label:"VS Code",icon:"apps\/vscode\.png",([^}]*)\}\);/;
+applyRegex(vscodeRe, (full, constVar, factoryVar, props) => {
+  if (props.includes("linuxDetect:")) return full;
+  const cleanProps = props.endsWith(",") ? props.slice(0, -1) : props;
+  return `const ${constVar}=${factoryVar}({id:"vscode",label:"VS Code",icon:"apps/vscode.png",${cleanProps},linuxDetect:__codexVSCodeLinuxDetect,linuxArgs:__codexVSCodeLinuxArgs,linuxOpen:__codexVSCodeLinuxOpen});`;
+});
+
+const insidersRe = /const ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\{id:"vscodeInsiders",label:"VS Code Insiders",icon:"apps\/vscode-insiders\.png",([^}]*)\}\);/;
+applyRegex(insidersRe, (full, constVar, factoryVar, props) => {
+  if (props.includes("linuxDetect:")) return full;
+  const cleanProps = props.endsWith(",") ? props.slice(0, -1) : props;
+  return `const ${constVar}=${factoryVar}({id:"vscodeInsiders",label:"VS Code Insiders",icon:"apps/vscode-insiders.png",${cleanProps},linuxDetect:__codexVSCodeInsidersLinuxDetect,linuxArgs:__codexVSCodeLinuxArgs,linuxOpen:__codexVSCodeLinuxOpen});`;
+});
+
+const fileManagerRe = /const ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\{id:"fileManager",label:"Finder",icon:"apps\/finder\.png",kind:"fileManager",darwin:\{detect:\(\)=>"open",args:t=>([A-Za-z_$][\w$]*)\(t\)\},win32:\{label:"Explorer",icon:"apps\/file-explorer\.png",detect:([A-Za-z_$][\w$]*),args:t=>[A-Za-z_$][\w$]*\(t\),open:async\(\{path:t\}\)=>([A-Za-z_$][\w$]*)\(t\)\}\}\);/;
+applyRegex(fileManagerRe, (_, constVar, factoryVar, argsFn, winDetectFn, winOpenFn) =>
+  `const ${constVar}=${factoryVar}({id:"fileManager",label:"Finder",icon:"apps/finder.png",kind:"fileManager",darwin:{detect:()=>"open",args:t=>${argsFn}(t)},win32:{label:"Explorer",icon:"apps/file-explorer.png",detect:${winDetectFn},args:t=>${argsFn}(t),open:async({path:t})=>${winOpenFn}(t)},linux:{label:"File Manager",icon:"apps/file-explorer.png",detect:__codexFileManagerLinuxDetect,args:t=>__codexFileManagerLinuxArgs(t)}});`
+);
+
+if (!source.includes("function __codexVSCodeLinuxDetect()")) {
+  const helperRe = /function ([A-Za-z_$][\w$]*)\(\)\{return ([A-Za-z_$][\w$]*)\(\{pathCommand:([A-Za-z_$][\w$]*)\("code-insiders"\),executableName:"Code - Insiders\.exe",installDirName:"Microsoft VS Code Insiders"\}\)\}/;
+  applyRegex(
+    helperRe,
+    (full, insidersWinFn, winResolveFn, whichFn) =>
+      `${full}function __codexVSCodeLinuxDetect(){const t=process.env.CODEX_VSCODE_PATH?.trim();if(t)return t;return ${whichFn}("code")||${whichFn}("codium")||null}function __codexVSCodeInsidersLinuxDetect(){const t=process.env.CODEX_VSCODE_INSIDERS_PATH?.trim();if(t)return t;return ${whichFn}("code-insiders")||${whichFn}("codium-insiders")||null}function __codexVSCodeLinuxArgs(t,e){return e?["--goto",\`${"${t}:${e.line}:${e.column}"}\`]:[t]}async function __codexVSCodeLinuxOpen({command:t,path:e,location:n}){const r=__codexVSCodeLinuxArgs(e,n);try{await gr(t,r)}catch{await gr(t,[e])}}`
+  );
+}
+
+if (!source.includes("function __codexFileManagerLinuxDetect()")) {
+  const fileManagerHelperRe = /function ([A-Za-z_$][\w$]*)\(t\)\{let e=t;for\(;;\)\{if\(([A-Za-z_$][\w$]*)\.existsSync\(e\)\)return e;const n=([A-Za-z_$][\w$]*)\.dirname\(e\);if\(n===e\)return null;e=n\}\}/;
+  applyRegex(
+    fileManagerHelperRe,
+    (full, nearestExistingFn, fsVar, pathVar) =>
+      `${full}function __codexFileManagerLinuxDetect(){return process.platform==="linux"?"xdg-open":null}function __codexFileManagerLinuxArgs(t){const e=${nearestExistingFn}(t)??t;try{return [${fsVar}.existsSync(e)&&${fsVar}.statSync(e).isDirectory()?e:${pathVar}.dirname(e)]}catch{return [${pathVar}.dirname(e)]}}`
+  );
+}
+
+if (source !== original) {
+  fs.writeFileSync(bundlePath, source);
+  console.error("[codex-linux] Auto-heal: patched open targets in main.js (VS Code + file manager)");
+}
+NODE
+}
+
+auto_heal_sidebar_active_threads() {
+  [ "${CODEX_PATCH_AUTO_HEAL:-1}" = "1" ] || return 0
+
+  local webview_index web_bundle_rel web_bundle
+  webview_index="$APP_DIR/webview/index.html"
+  web_bundle_rel=""
+  web_bundle=""
+
+  if [ -f "$webview_index" ]; then
+    web_bundle_rel="$(grep -oE 'assets/index-[^"]+\.js' "$webview_index" | head -n 1 || true)"
+  fi
+
+  if [ -n "$web_bundle_rel" ] && [ -f "$APP_DIR/webview/$web_bundle_rel" ]; then
+    web_bundle="$APP_DIR/webview/$web_bundle_rel"
+  else
+    web_bundle="$(find "$APP_DIR/webview/assets" -maxdepth 1 -name 'index-*.js' -type f -print | head -n 1 || true)"
+  fi
+
+  [ -n "$web_bundle" ] || return 0
+
+  node - <<'NODE' "$web_bundle"
+const fs = require("node:fs");
+
+const bundlePath = process.argv[2];
+if (!bundlePath) process.exit(0);
+
+let source = fs.readFileSync(bundlePath, "utf8");
+const original = source;
+const applied = [];
+
+function applyExact(name, from, to, required = true) {
+  if (source.includes(to)) return true;
+  if (!source.includes(from)) {
+    if (required) console.error(`[codex-linux] Auto-heal sidebar patch: missing pattern (${name}).`);
+    return !required;
+  }
+  source = source.replace(from, () => to);
+  applied.push(name);
+  return true;
+}
+
+const alreadyPatched =
+  source.includes('sidebarElectron.activeThreads') &&
+  source.includes("codexActiveSidebarItems=") &&
+  !source.includes("toggle_active_threads") &&
+  !source.includes("codexActiveSidebarItems.length>0?") &&
+  source.includes("title:mn,children:f.jsx(DOe,{items:codexActiveSidebarItems");
+if (alreadyPatched) process.exit(0);
+
+let ok = true;
+
+ok =
+  applyExact(
+    "cleanup-setting-key",
+    'Os("sidebar-view-v2","threads"),__codexSidebarActiveFilterKey=Os("sidebar-active-thread-filter-v1","all");function $$t(){',
+    'Os("sidebar-view-v2","threads");function $$t(){',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "cleanup-state",
+    'const{groups:Me,isWorkspaceRootOptionsLoading:Oe,workspaceRootOptions:Ue,workspaceRootLabels:He}=YUt(Ie,Re),[Ze,Xe]=cr(H$t),[codexActiveFilter,codexSetActiveFilter]=cr(__codexSidebarActiveFilterKey),codexShowActiveOnly=codexActiveFilter==="active";',
+    'const{groups:Me,isWorkspaceRootOptionsLoading:Oe,workspaceRootOptions:Ue,workspaceRootLabels:He}=YUt(Ie,Re),[Ze,Xe]=cr(H$t);',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "cleanup-visible-groups",
+    'const gt=ft.length,yt=!Oe,dt=be.length>0,codexVisibleGroups=codexShowActiveOnly?Me.map(mn=>({...mn,tasks:mn.tasks.filter(_n=>__codexSidebarIsActiveThread(_n)||j3(_n)===x)})).filter(mn=>mn.tasks.length>0):Me,at=!Pe&&codexVisibleGroups.length===0&&_e.length===0&&!dt;',
+    'const gt=ft.length,yt=!Oe,dt=be.length>0,at=!Pe&&Me.length===0&&_e.length===0&&!dt;',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "cleanup-visible-items",
+    'const vt=ys(Dt),Bt=Ph(),Zt=iWt({items:xe,itemsForVisibilityLookup:[...be,...xe],showRecent:Pe,hasGitRpc:Bt,workspaceTaskFilter:F,currentConversationId:S,isBackgroundSubagentsEnabled:ee}).filter(K$t),codexActiveItems=Zt.filter(mn=>__codexSidebarIsActiveThread(mn.task)||j3(mn.task)===x),codexVisibleItems=codexShowActiveOnly?codexActiveItems:Zt;',
+    'const vt=ys(Dt),Bt=Ph(),Zt=iWt({items:xe,itemsForVisibilityLookup:[...be,...xe],showRecent:Pe,hasGitRpc:Bt,workspaceTaskFilter:F,currentConversationId:S,isBackgroundSubagentsEnabled:ee}).filter(K$t);',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "cleanup-visible-item-usage",
+    'const Ut=Pe&&SUt({items:codexVisibleItems,currentThreadKey:x,maxItems:q5e,getTask:G$t}),en=CUt({pinnedItems:be,showRecent:Pe,recentItems:codexVisibleItems,groups:codexVisibleGroups,isBackgroundSubagentsEnabled:ee}),Wt=new Map;',
+    'const Ut=Pe&&SUt({items:Zt,currentThreadKey:x,maxItems:q5e,getTask:G$t}),en=CUt({pinnedItems:be,showRecent:Pe,recentItems:Zt,groups:Me,isBackgroundSubagentsEnabled:ee}),Wt=new Map;',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "cleanup-group-selection",
+    'if(x!=null)if(t[27]!==x||t[28]!==codexVisibleGroups){for(const mn of codexVisibleGroups)if(mn.tasks.some(_n=>j3(_n)===x)){Ft=mn.path;break}t[27]=x,t[28]=codexVisibleGroups,t[29]=Ft}else Ft=t[29];',
+    'if(x!=null)if(t[27]!==x||t[28]!==Me){for(const mn of Me)if(mn.tasks.some(_n=>j3(_n)===x)){Ft=mn.path;break}t[27]=x,t[28]=Me,t[29]=Ft}else Ft=t[29];',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "cleanup-toggle-button",
+    'f.jsx(I$t,{groupByWorkspace:!Pe,onGroupByWorkspaceChange:mn=>{o({eventName:"codex_app_nav_clicked",metadata:{item:"toggle_recent"}}),De(mn?"threads":"recent")}}),f.jsx(Ge,{className:"h-6 rounded-md px-2 text-xs",color:codexShowActiveOnly?"secondary":"ghostActive",size:"default",onClick:()=>{o({eventName:"codex_app_nav_clicked",metadata:{item:"toggle_active_threads"}}),codexSetActiveFilter(codexShowActiveOnly?"all":"active")},children:f.jsx(q,{id:"sidebarElectron.activeOnlyToggle",defaultMessage:"Active",description:"Toggle button label to show only active threads in sidebar"})})]})',
+    'f.jsx(I$t,{groupByWorkspace:!Pe,onGroupByWorkspaceChange:mn=>{o({eventName:"codex_app_nav_clicked",metadata:{item:"toggle_recent"}}),De(mn?"threads":"recent")}})]})',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "cleanup-recent-render",
+    'children:mn=>f.jsx(DOe,{items:codexVisibleItems,ariaLabel:mn.map(W$t).join(""),',
+    'children:mn=>f.jsx(DOe,{items:Zt,ariaLabel:mn.map(W$t).join(""),',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "cleanup-grouped-render",
+    'groups:codexVisibleGroups,unpinnedItemByTaskKey:ge,',
+    'groups:Me,unpinnedItemByTaskKey:ge,',
+    false
+  ) && ok;
+
+if (!source.includes("function __codexSidebarIsActiveThread(")) {
+  ok =
+    applyExact(
+      "ensure-active-helper",
+      'function TIt(t){if(t.kind==="remote"){const e=t.task.task_status_display?.latest_turn_status_display?.turn_status;return t.task.has_unread_turn===!0||e==="in_progress"||e==="pending"}return t.kind==="local"&&t.conversation.hasUnreadTurn?!0:t.kind==="local"?TD(t.conversation):t.kind==="pending-worktree"}function WI(t){',
+      'function TIt(t){if(t.kind==="remote"){const e=t.task.task_status_display?.latest_turn_status_display?.turn_status;return t.task.has_unread_turn===!0||e==="in_progress"||e==="pending"}return t.kind==="local"&&t.conversation.hasUnreadTurn?!0:t.kind==="local"?TD(t.conversation):t.kind==="pending-worktree"}function __codexSidebarIsActiveThread(t){if(t.kind==="remote"){const e=t.task.task_status_display?.latest_turn_status_display?.turn_status;return e==="in_progress"||e==="pending"}return t.kind==="local"?TD(t.conversation)||QEe(t.conversation):t.kind==="pending-worktree"}function WI(t){'
+    ) && ok;
+}
+
+ok =
+  applyExact(
+    "inject-active-items",
+    'const vt=ys(Dt),Bt=Ph(),Zt=iWt({items:xe,itemsForVisibilityLookup:[...be,...xe],showRecent:Pe,hasGitRpc:Bt,workspaceTaskFilter:F,currentConversationId:S,isBackgroundSubagentsEnabled:ee}).filter(K$t);',
+    'const vt=ys(Dt),Bt=Ph(),Zt=iWt({items:xe,itemsForVisibilityLookup:[...be,...xe],showRecent:Pe,hasGitRpc:Bt,workspaceTaskFilter:F,currentConversationId:S,isBackgroundSubagentsEnabled:ee}).filter(K$t),codexActiveSidebarItems=Zt.filter(mn=>__codexSidebarIsActiveThread(mn.task)||j3(mn.task)===x);'
+  ) && ok;
+
+ok =
+  applyExact(
+    "upgrade-gated-active-top-section",
+    '):null]})}),codexActiveSidebarItems.length>0?f.jsx("div",{className:"px-row-x",children:f.jsx(qL,{children:f.jsx(q,{id:"sidebarElectron.activeThreads",defaultMessage:"Active threads",description:"List label for active threads at the top of the sidebar",children:mn=>f.jsx(DOe,{items:codexActiveSidebarItems,ariaLabel:mn.map(W$t).join(""),currentThreadKey:x,onActivateThread:C,className:"pb-2",itemClassName:"after:block after:h-1 after:content-[\'\'] last:after:hidden",rowOptions:{mutePendingAutomation:!0,expandedSubagentParents:it,onToggleSubagentChildren:Je}})})})}):null,dt?f.jsx("div",{className:"px-row-x",children:f.jsx(qL,{children:f.jsx(q,{id:"sidebarElectron.pinnedThreads"',
+    '):null]})}),f.jsx("div",{className:"px-row-x",children:f.jsx(q,{id:"sidebarElectron.activeThreads",defaultMessage:"Active threads",description:"List label for active threads at the top of the sidebar",children:mn=>f.jsx(qL,{title:mn,children:f.jsx(DOe,{items:codexActiveSidebarItems,ariaLabel:mn.map(W$t).join(""),currentThreadKey:x,onActivateThread:C,className:"pb-2",itemClassName:"after:block after:h-1 after:content-[\'\'] last:after:hidden",rowOptions:{mutePendingAutomation:!0,expandedSubagentParents:it,onToggleSubagentChildren:Je}})})})}),dt?f.jsx("div",{className:"px-row-x",children:f.jsx(qL,{children:f.jsx(q,{id:"sidebarElectron.pinnedThreads"',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "upgrade-ungated-active-top-section-title",
+    '):null]})}),f.jsx("div",{className:"px-row-x",children:f.jsx(qL,{children:f.jsx(q,{id:"sidebarElectron.activeThreads",defaultMessage:"Active threads",description:"List label for active threads at the top of the sidebar",children:mn=>f.jsx(DOe,{items:codexActiveSidebarItems,ariaLabel:mn.map(W$t).join(""),currentThreadKey:x,onActivateThread:C,className:"pb-2",itemClassName:"after:block after:h-1 after:content-[\'\'] last:after:hidden",rowOptions:{mutePendingAutomation:!0,expandedSubagentParents:it,onToggleSubagentChildren:Je}})})})}),dt?f.jsx("div",{className:"px-row-x",children:f.jsx(qL,{children:f.jsx(q,{id:"sidebarElectron.pinnedThreads"',
+    '):null]})}),f.jsx("div",{className:"px-row-x",children:f.jsx(q,{id:"sidebarElectron.activeThreads",defaultMessage:"Active threads",description:"List label for active threads at the top of the sidebar",children:mn=>f.jsx(qL,{title:mn,children:f.jsx(DOe,{items:codexActiveSidebarItems,ariaLabel:mn.map(W$t).join(""),currentThreadKey:x,onActivateThread:C,className:"pb-2",itemClassName:"after:block after:h-1 after:content-[\'\'] last:after:hidden",rowOptions:{mutePendingAutomation:!0,expandedSubagentParents:it,onToggleSubagentChildren:Je}})})})}),dt?f.jsx("div",{className:"px-row-x",children:f.jsx(qL,{children:f.jsx(q,{id:"sidebarElectron.pinnedThreads"',
+    false
+  ) && ok;
+
+ok =
+  applyExact(
+    "inject-active-top-section",
+    '):null]})}),dt?f.jsx("div",{className:"px-row-x",children:f.jsx(qL,{children:f.jsx(q,{id:"sidebarElectron.pinnedThreads"',
+    '):null]})}),f.jsx("div",{className:"px-row-x",children:f.jsx(q,{id:"sidebarElectron.activeThreads",defaultMessage:"Active threads",description:"List label for active threads at the top of the sidebar",children:mn=>f.jsx(qL,{title:mn,children:f.jsx(DOe,{items:codexActiveSidebarItems,ariaLabel:mn.map(W$t).join(""),currentThreadKey:x,onActivateThread:C,className:"pb-2",itemClassName:"after:block after:h-1 after:content-[\'\'] last:after:hidden",rowOptions:{mutePendingAutomation:!0,expandedSubagentParents:it,onToggleSubagentChildren:Je}})})})}),dt?f.jsx("div",{className:"px-row-x",children:f.jsx(qL,{children:f.jsx(q,{id:"sidebarElectron.pinnedThreads"'
+  ) && ok;
+
+if (!ok) process.exit(0);
+
+if (source !== original) {
+  fs.writeFileSync(bundlePath, source);
+  console.error(`[codex-linux] Auto-heal: patched sidebar active threads toggle (${applied.join(", ")}).`);
+}
+NODE
+}
+
+patch_failure=0
+
+if ! auto_heal_open_targets; then
+  patch_failure=1
+fi
+
+if ! auto_heal_sidebar_active_threads; then
+  patch_failure=1
+fi
+
+if [ "$patch_failure" -ne 0 ]; then
+  if [ "${CODEX_PATCH_STRICT:-0}" = "1" ]; then
+    echo "ERROR: failed to auto-heal runtime patches." >&2
+    exit 1
+  fi
 fi
 
 check_for_updates_async
@@ -1112,6 +1835,8 @@ main() {
   find_and_extract_asar
   restore_user_state_from_latest_backup
   patch_main_js_linux_open_target
+  patch_plan_mode_indicator
+  patch_sidebar_active_threads
   patch_background_terminal_stop
   patch_mcp_install_auth
 
@@ -1120,6 +1845,10 @@ main() {
   log "Electron version: $version"
 
   ensure_local_electron "$version"
+  if [ -n "${ELECTRON_RUNTIME_VERSION:-}" ]; then
+    version="$ELECTRON_RUNTIME_VERSION"
+  fi
+  log "Electron runtime selected: $version"
 
   if needs_native_rebuild; then
     rebuild_native_modules "$version"

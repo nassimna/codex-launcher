@@ -7,6 +7,7 @@ This folder contains the Windows-specific launcher flow.
 - `codex-windows-bridge.ps1` - main Windows setup script
 - `install-codex-windows.ps1` - convenience wrapper (uses local bridge when available, otherwise downloads this repo and runs the script)
 - `patch-main-windows.cjs` - bundle patcher for editor detection on Windows
+- `patch-webview-diff-windows.cjs` - bundle patcher that makes the diff panel editable
 
 ## What this script does
 
@@ -15,11 +16,12 @@ This folder contains the Windows-specific launcher flow.
 3. Installs a matching Electron runtime locally.
 4. Rebuilds Windows native modules (`better-sqlite3`, `node-pty`) for the app Electron ABI.
 5. Patches external editor detection for Windows VS Code paths.
-6. Creates launchers:
+6. Patches webview diff editors to allow inline editing in the modified pane.
+7. Creates launchers:
    - `run-codex.vbs` (windowless, for shortcut/double click)
    - `run-codex.ps1` (actual launcher logic)
    - `run-codex.cmd` (CLI-friendly wrapper)
-7. Extracts a Codex logo from app assets and uses it for the Start Menu shortcut icon when possible.
+8. Extracts a Codex logo from app assets and uses it for the Start Menu shortcut icon when possible.
 
 ## Prerequisites
 
