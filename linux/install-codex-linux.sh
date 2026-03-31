@@ -16,10 +16,10 @@ if [ -f "$LOCAL_BRIDGE" ]; then
   exec "$LOCAL_BRIDGE" "$@"
 fi
 
-REPO_URL="https://github.com/nassimna/codex-linux-launcher"
+REPO_URL="https://github.com/nassimna/codex-launcher"
 ARCHIVE_URL="${REPO_URL}/archive/refs/heads/main.tar.gz"
 TMP_DIR="$(mktemp -d)"
-TARGET_DIR="$TMP_DIR/codex-linux-launcher-main"
+TARGET_DIR="$TMP_DIR/codex-launcher-main"
 
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -36,7 +36,7 @@ if ! command -v tar >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "Downloading codex-linux-launcher archive..."
+echo "Downloading codex-launcher archive..."
 curl -fsSL "$ARCHIVE_URL" -o "$TMP_DIR/source.tar.gz"
 
 tar -xzf "$TMP_DIR/source.tar.gz" -C "$TMP_DIR"

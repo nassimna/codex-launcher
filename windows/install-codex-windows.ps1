@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$repoUrl = "https://github.com/nassimna/codex-linux-launcher"
+$repoUrl = "https://github.com/nassimna/codex-launcher"
 $archiveUrl = "$repoUrl/archive/refs/heads/main.zip"
 $tmpDir = Join-Path $env:TEMP ("codex-windows-installer-" + [guid]::NewGuid().ToString("N"))
 $zipPath = Join-Path $tmpDir "source.zip"
@@ -29,7 +29,7 @@ try {
 
   New-Item -ItemType Directory -Force -Path $tmpDir, $extractDir | Out-Null
 
-  Write-Host "Downloading codex-linux-launcher archive..."
+  Write-Host "Downloading codex-launcher archive..."
   $oldProgressPreference = $ProgressPreference
   try {
     # Speed up download in Windows PowerShell by suppressing progress rendering.
@@ -41,7 +41,7 @@ try {
   }
   Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
 
-  $scriptPath = Join-Path $extractDir "codex-linux-launcher-main\windows\codex-windows-bridge.ps1"
+  $scriptPath = Join-Path $extractDir "codex-launcher-main\windows\codex-windows-bridge.ps1"
   if (-not (Test-Path $scriptPath)) {
     throw "Archive does not include windows/codex-windows-bridge.ps1"
   }

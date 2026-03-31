@@ -1,6 +1,7 @@
 # Linux Launcher (Unofficial)
 
 This folder contains the Linux-specific implementation that adapts the official `Codex.dmg` package to run on Linux.
+It is for Linux users who want a repeatable launcher script instead of manually unpacking and rebuilding the app bundle.
 
 ## Files
 
@@ -13,7 +14,7 @@ This folder contains the Linux-specific implementation that adapts the official 
 From repository root:
 
 ```bash
-git clone https://github.com/nassimna/codex-linux-launcher.git codex-launcher
+git clone https://github.com/nassimna/codex-launcher.git codex-launcher
 cd codex-launcher
 chmod +x linux/codex-linux-bridge.sh
 ./linux/codex-linux-bridge.sh
@@ -22,7 +23,7 @@ chmod +x linux/codex-linux-bridge.sh
 Or with curl:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nassimna/codex-linux-launcher/main/linux/install-codex-linux.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nassimna/codex-launcher/main/linux/install-codex-linux.sh | bash
 ```
 
 ## What this script does

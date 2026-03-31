@@ -1,6 +1,17 @@
 # Codex Launcher (Unofficial)
 
-This repository contains separate launchers for running Codex on Linux and Windows.
+Unofficial launchers for running Codex on Linux and Windows.
+This repository is for developers who want a practical local launcher flow without manually unpacking and patching the desktop app each time.
+
+Quick start:
+
+```bash
+git clone https://github.com/nassimna/codex-launcher.git
+cd codex-launcher
+./linux/codex-linux-bridge.sh
+```
+
+On Windows, run `.\windows\codex-windows-bridge.ps1` from the repository root in PowerShell.
 
 ## Repository structure
 
@@ -21,7 +32,7 @@ This repository contains separate launchers for running Codex on Linux and Windo
 ## Linux install and run
 
 ```bash
-git clone https://github.com/nassimna/codex-linux-launcher.git codex-launcher
+git clone https://github.com/nassimna/codex-launcher.git codex-launcher
 cd codex-launcher
 chmod +x linux/codex-linux-bridge.sh
 ./linux/codex-linux-bridge.sh
@@ -36,7 +47,7 @@ Run after install:
 Optional one-liner installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nassimna/codex-linux-launcher/main/linux/install-codex-linux.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nassimna/codex-launcher/main/linux/install-codex-linux.sh | bash
 ```
 
 ## Windows install and run
@@ -44,7 +55,7 @@ curl -fsSL https://raw.githubusercontent.com/nassimna/codex-linux-launcher/main/
 PowerShell:
 
 ```powershell
-git clone https://github.com/nassimna/codex-linux-launcher.git codex-launcher
+git clone https://github.com/nassimna/codex-launcher.git codex-launcher
 cd codex-launcher
 Set-ExecutionPolicy -Scope Process Bypass
 .\windows\codex-windows-bridge.ps1
@@ -65,7 +76,7 @@ Optional installer wrapper:
 One-shot install from PowerShell (no git required):
 
 ```powershell
-irm https://raw.githubusercontent.com/nassimna/codex-linux-launcher/main/windows/install-codex-windows.ps1 | iex
+irm https://raw.githubusercontent.com/nassimna/codex-launcher/main/windows/install-codex-windows.ps1 | iex
 ```
 
 The Windows bridge script bootstraps missing dependencies (`Node.js`, `7-Zip`, and native-build prerequisites when required) via `winget` by default.
@@ -74,8 +85,3 @@ The Windows bridge script bootstraps missing dependencies (`Node.js`, `7-Zip`, a
 
 - Linux details: `linux/README.md`
 - Windows details: `windows/README.md`
-
-## Diff Panel Edit Test
-
-This block is intentionally added as a temporary change so you can test editing
-directly in the app diff panel.
